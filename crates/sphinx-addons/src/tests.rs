@@ -437,3 +437,162 @@ fn invalid_options_are_an_error() {
     let err = Options::read(&json!({"nope": 1})).unwrap_err();
     assert!(err.message().contains("nope"), "{err}");
 }
+
+#[tokio::test]
+async fn index_entries_make_an_index_page() {
+    let out = build(
+        &[
+            (
+                "a.rst",
+                ".. index::\n   single: loop; for\n   pair: list; tuple\n\n\
+                 .. index::\n   !Python\n   see: snake; Python\n\n\
+                 Some :index:`banana` and :index:`text <apple, pear>`.\n\n\
+                 See :ref:`genindex`.\n",
+            ),
+            ("b.md", "{index}`Apple`\n"),
+        ],
+        Value::Null,
+    )
+    .await;
+    assert!(out[0].1.is_empty(), "{:?}", out[0].1);
+    let a = tree(&out[0].0);
+    assert_eq!(a[0], json!({"type": "anchor", "id": "index-0"}));
+    let para = &a[2]["children"];
+    assert_eq!(para[1], json!({"type": "anchor", "id": "index-2"}));
+    assert_eq!(para[2]["value"], "banana");
+    assert_eq!(para[5]["value"], "text");
+    let link = &a[3]["children"][1];
+    assert_eq!(link["target"], json!({"document": "genindex.md"}));
+    assert_eq!(link["children"][0]["value"], "Index");
+    // The generated page comes last.
+    let (index, d) = &out[2];
+    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(index.source, "genindex.md");
+    assert_eq!(index.metadata["nav_exclude"], json!(true));
+    let mut lines = Vec::new();
+    fn walk(nodes: &[Node], depth: usize, out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Node::Heading(h) => out.push(format!("# {}", plain_text(&h.children))),
+                Node::ListItem(item) => {
+                    let line = item
+                        .children
+                        .first()
+                        .map(|p| {
+                            p.children()
+                                .iter()
+                                .map(|n| match n {
+                                    Node::Link(l) => {
+                                        format!("[{}]({})", plain_text(&l.children), l.url)
+                                    }
+                                    other => plain_text(std::slice::from_ref(other)),
+                                })
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default();
+                    out.push(format!("{}{line}", "  ".repeat(depth)));
+                    walk(&item.children[1..], depth + 1, out);
+                    continue;
+                }
+                Node::List(l) => walk(&l.children, depth, out),
+                _ => walk(node.children(), depth, out),
+            }
+        }
+    }
+    walk(&index.children, 0, &mut lines);
+    assert_eq!(
+        lines,
+        [
+            "# Index",
+            "# A",
+            "[Apple](a.rst#index-3), [[2]](b.md#index-0)",
+            "# B",
+            "[banana](a.rst#index-2)",
+            "# L",
+            "list",
+            "  [tuple](a.rst#index-0)",
+            "loop",
+            "  [for](a.rst#index-0)",
+            "# P",
+            "[pear](a.rst#index-3)",
+            "[Python](a.rst#index-1)",
+            "# S",
+            "snake",
+            "  see Python",
+            "# T",
+            "tuple",
+            "  [list](a.rst#index-0)",
+        ],
+        "{lines:#?}"
+    );
+}
+
+#[tokio::test]
+async fn rubrics() {
+    let t = same(
+        ".. rubric:: Notes *here*\n   :heading-level: 3\n\n.. rubric:: Plain\n",
+        "```{rubric} Notes *here*\n:heading-level: 3\n```\n\n```{rubric} Plain\n```\n",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(t[0]["kind"], "rubric");
+    assert_eq!(t[0]["attrs"], json!({"html_tag": "h3"}));
+    assert_eq!(t[0]["children"][1]["type"], "emphasis");
+    assert_eq!(t[1]["attrs"], json!({"html_tag": "p"}));
+}
+
+#[tokio::test]
+async fn numbered_toctrees_and_navigation() {
+    let out = build(
+        &[
+            (
+                "index.rst",
+                "Home\n====\n\n.. toctree::\n   :numbered:\n   :hidden:\n\n   one\n   two\n",
+            ),
+            (
+                "one.md",
+                "# One {#one}\n\n## Part {#part}\n\nSee {numref}`part` and {numref}`Sec. %s <two>`.\n\n\
+                 ```{toctree}\nsub\n```\n",
+            ),
+            ("two.md", "# Two {#two}\n"),
+            ("sub.md", "# Sub {#sub}\n"),
+        ],
+        json!({"numfig": true}),
+    )
+    .await;
+    let (index, _) = &out[0];
+    assert_eq!(
+        index.metadata["nav_children"],
+        json!(["/one.md", "/two.md"])
+    );
+    // Hidden: nothing shown.
+    assert_eq!(tree(index)[0]["children"].as_array().unwrap().len(), 1);
+    let (one, d) = &out[1];
+    assert!(d.is_empty(), "{d:?}");
+    let headings: Vec<String> = one
+        .descendants()
+        .filter_map(|n| match n {
+            Node::Heading(h) => Some(plain_text(&h.children)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headings, ["1. One", "1.1. Part"]);
+    let links: Vec<String> = one
+        .descendants()
+        .filter_map(|n| match n {
+            Node::Link(l) => Some(format!("{} -> {}", plain_text(&l.children), l.url)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        links,
+        [
+            "Section 1.1 -> #part",
+            "Sec. 2 -> two.md#two",
+            "1.2. Sub -> sub.md"
+        ]
+    );
+    assert_eq!(one.metadata["nav_children"], json!(["/sub.md"]));
+    let (sub, _) = &out[3];
+    assert_eq!(plain_text(&sub.children), "1.2. Sub");
+}

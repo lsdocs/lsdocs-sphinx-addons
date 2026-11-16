@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lsdocs_plugin_sdk::doctree::{
-    Anchor, Custom, Document, Emphasis, Figure, InlineCode, Link, LinkTarget, List, ListItem, Node,
+    Custom, Document, Emphasis, Figure, InlineCode, Link, LinkTarget, List, ListItem, Node,
     Paragraph, Span, Strong, Text, plain_text, text,
 };
 use lsdocs_plugin_sdk::protocol::Diagnostic;
@@ -40,6 +40,9 @@ pub(crate) const NAMES: &[&str] = &[
     "samp",
     "index",
 ];
+
+/// The source path of the generated index page.
+pub(crate) const GENINDEX: &str = "genindex.md";
 
 /// Extensions of the files `doc` and `toctree` take as documents.
 const DOCUMENT_EXTENSIONS: &[&str] = &["rst", "rest", "md", "markdown"];
@@ -213,6 +216,8 @@ pub(crate) fn collect(document: &Document, notes: &Notes, _options: &Options) ->
         "todos": notes.todos,
         "sections": sections(&document.children),
         "toctree": notes.toctree,
+        "toctrees": notes.toctrees,
+        "index": notes.index,
     })
 }
 
@@ -223,8 +228,10 @@ pub(crate) struct Site<'a> {
     docs: Vec<(String, String)>,
     files: BTreeSet<&'a str>,
     options: &'a Options,
-    /// Anchors made for `index` roles so far.
-    indexes: std::cell::Cell<u32>,
+    /// Section numbers from numbered toctrees, by document and section id.
+    numbers: BTreeMap<String, BTreeMap<String, Vec<u32>>>,
+    /// Whether the index page exists.
+    has_index: bool,
 }
 
 impl<'a> Site<'a> {
@@ -233,13 +240,46 @@ impl<'a> Site<'a> {
             .as_object()
             .map(|m| m.iter().map(|(k, v)| (k.as_str(), v)).collect())
             .unwrap_or_default();
+        let numbers = section_numbers(&pages);
+        let has_index = pages
+            .values()
+            .any(|p| p["index"].as_array().is_some_and(|a| !a.is_empty()));
         Self {
             pages,
             docs: documents(files),
             files: files.iter().map(String::as_str).collect(),
             options,
-            indexes: std::cell::Cell::new(0),
+            numbers,
+            has_index,
         }
+    }
+
+    /// The number of section `id` in `doc`, as `1.2`, if it has one.
+    fn section_number(&self, doc: &str, id: &str) -> Option<String> {
+        let number = self.numbers.get(doc)?.get(id)?;
+        Some(
+            number
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+
+    /// The number of the page `doc` (its one top section), if it has one.
+    fn page_number(&self, doc: &str) -> Option<String> {
+        let sections = self.pages.get(doc)?["sections"].as_array()?;
+        match sections.as_slice() {
+            [only] => self.section_number(doc, only["id"].as_str()?),
+            _ => None,
+        }
+    }
+
+    /// A page's title in a toctree: numbered if its section is.
+    fn numbered_title(&self, doc: &str) -> Option<String> {
+        let number = self.page_number(doc)?;
+        let title = self.pages.get(doc)?["title"].as_str()?;
+        Some(format!("{number}. {title}"))
     }
 
     /// The document defining the anchor `id`, if any (the first, in
@@ -291,6 +331,9 @@ impl<'a> Site<'a> {
                     }
                 },
             );
+        }
+        if let Some(numbers) = self.numbers.get(&source) {
+            number_headings(&mut document.children, numbers);
         }
         let children = std::mem::take(&mut document.children);
         document.children = self.nodes(children, &source, diagnostics);
@@ -385,6 +428,10 @@ impl<'a> Site<'a> {
         }
         match name {
             "ref" => vec![self.reference(&target, title.as_deref(), span)],
+            "doc" if target == "genindex" && self.has_index => {
+                let children = plain(title.as_deref().unwrap_or("Index"));
+                vec![self.link_to(source, GENINDEX, None, children, span)]
+            }
             "doc" => match find_document(&self.docs, source, &target) {
                 Some(doc) => {
                     let children = title.map(|t| plain(&t)).unwrap_or_default();
@@ -543,22 +590,6 @@ impl<'a> Site<'a> {
                     span,
                 )]
             }
-            "index" => {
-                let n = self.indexes.get();
-                self.indexes.set(n + 1);
-                // `:index:` text shows as it is; `text <entry>` shows the
-                // text.
-                vec![
-                    Node::Anchor(Anchor {
-                        span,
-                        id: format!("index-role-{n}"),
-                    }),
-                    Node::Text(Text {
-                        span,
-                        value: title.unwrap_or_else(|| raw.to_owned()),
-                    }),
-                ]
-            }
             // A role declared by another plugin: left for it.
             _ => vec![Node::Custom(c.clone())],
         }
@@ -568,6 +599,18 @@ impl<'a> Site<'a> {
     /// for `transform-links` to resolve and fill in. A figure's caption is
     /// its text if none is given.
     fn reference(&self, target: &str, title: Option<&str>, span: Option<Span>) -> Node {
+        if target == "genindex" && self.has_index && self.anchor_document(target).is_none() {
+            return Node::Link(Link {
+                span,
+                url: format!("/{GENINDEX}"),
+                title: None,
+                target: Some(LinkTarget {
+                    document: Some(GENINDEX.to_owned()),
+                    ..LinkTarget::default()
+                }),
+                children: vec![text(title.unwrap_or("Index"))],
+            });
+        }
         let label = self.label(target);
         let children = match title {
             Some(t) => vec![text(t)],
@@ -605,6 +648,23 @@ impl<'a> Site<'a> {
         }
         let label = self.label(target);
         let Some((doc, info)) = self.find("numbers", &label) else {
+            // A numbered section.
+            if let Some(doc) = self.anchor_document(&label)
+                && let Some(number) = self.section_number(doc, &label)
+            {
+                let name = self
+                    .pages
+                    .get(doc)
+                    .and_then(|p| section_title(&p["sections"], &label));
+                let format = title
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.options.numfig_format("section"));
+                let label_text = format
+                    .replace("%s", &number)
+                    .replace("{number}", &number)
+                    .replace("{name}", name.as_deref().unwrap_or_default());
+                return vec![self.link_to(source, doc, Some(&label), vec![text(label_text)], span)];
+            }
             out.push(warning(
                 span,
                 format!("undefined label or unnumbered target: {target:?}"),
@@ -667,6 +727,19 @@ impl<'a> Site<'a> {
             let Some(doc) = entry["document"].as_str() else {
                 continue;
             };
+            if doc == GENINDEX {
+                if self.has_index {
+                    let link = self.link_to(
+                        source,
+                        GENINDEX,
+                        None,
+                        title.map(|t| vec![text(t)]).unwrap_or_default(),
+                        c.span,
+                    );
+                    items.push(item(link, None));
+                }
+                continue;
+            }
             let mut visited = BTreeSet::from([source.to_owned()]);
             items.push(self.toc_entry(source, doc, title, 1, maxdepth, titles_only, &mut visited));
         }
@@ -707,11 +780,14 @@ impl<'a> Site<'a> {
         titles_only: bool,
         visited: &mut BTreeSet<String>,
     ) -> Node {
+        let shown = title
+            .map(str::to_owned)
+            .or_else(|| self.numbered_title(doc));
         let link = self.link_to(
             from,
             doc,
             None,
-            title.map(|t| vec![text(t)]).unwrap_or_default(),
+            shown.map(|t| vec![text(t)]).unwrap_or_default(),
             None,
         );
         if depth >= maxdepth || !visited.insert(doc.to_owned()) {
@@ -762,8 +838,11 @@ impl<'a> Site<'a> {
             .iter()
             .filter_map(|s| {
                 let id = s["id"].as_str()?;
-                let title = s["title"].as_str().unwrap_or_default();
-                let link = self.link_to(from, doc, Some(id), vec![text(title)], None);
+                let mut title = s["title"].as_str().unwrap_or_default().to_owned();
+                if let Some(number) = self.section_number(doc, id) {
+                    title = format!("{number}. {title}");
+                }
+                let link = self.link_to(from, doc, Some(id), vec![text(&title)], None);
                 let children = s["children"].as_array().cloned().unwrap_or_default();
                 let below = self.section_items(from, doc, &children, depth + 1, maxdepth);
                 Some(item(link, (!below.is_empty()).then(|| list(below))))
@@ -801,6 +880,288 @@ impl<'a> Site<'a> {
         }
         out
     }
+}
+
+/// Section numbers from numbered toctrees: for each toctree with
+/// `:numbered:`, its pages are numbered 1, 2, ... (below the number of the
+/// page holding it, if that has one), their sections below that, and the
+/// pages their own toctrees name after their sections, as deep as
+/// `:numbered:` says.
+fn section_numbers(pages: &BTreeMap<&str, &Value>) -> BTreeMap<String, BTreeMap<String, Vec<u32>>> {
+    let mut out: BTreeMap<String, BTreeMap<String, Vec<u32>>> = BTreeMap::new();
+    let mut done = BTreeSet::new();
+    for (source, page) in pages {
+        for tree in page["toctrees"].as_array().into_iter().flatten() {
+            let depth = tree["numbered"].as_u64().unwrap_or(0);
+            if depth == 0 {
+                continue;
+            }
+            let prefix: Vec<u32> = page["sections"]
+                .as_array()
+                .and_then(|s| match s.as_slice() {
+                    [only] => only["id"].as_str(),
+                    _ => None,
+                })
+                .and_then(|id| out.get(*source)?.get(id).cloned())
+                .unwrap_or_default();
+            let mut n = 0;
+            for entry in tree["entries"].as_array().into_iter().flatten() {
+                let Some(doc) = entry.as_str() else {
+                    continue;
+                };
+                n += 1;
+                let mut number = prefix.clone();
+                number.push(n);
+                number_page(doc, number, depth as usize, pages, &mut out, &mut done);
+            }
+        }
+    }
+    out
+}
+
+fn number_page(
+    doc: &str,
+    number: Vec<u32>,
+    depth: usize,
+    pages: &BTreeMap<&str, &Value>,
+    out: &mut BTreeMap<String, BTreeMap<String, Vec<u32>>>,
+    done: &mut BTreeSet<String>,
+) {
+    if number.len() > depth || !done.insert(doc.to_owned()) {
+        return;
+    }
+    let Some(page) = pages.get(doc) else {
+        return;
+    };
+    let sections = page["sections"].as_array().cloned().unwrap_or_default();
+    let children = match sections.as_slice() {
+        [only] => {
+            if let Some(id) = only["id"].as_str() {
+                out.entry(doc.to_owned())
+                    .or_default()
+                    .insert(id.to_owned(), number.clone());
+            }
+            only["children"].as_array().cloned().unwrap_or_default()
+        }
+        _ => sections,
+    };
+    let mut n = number_sections(doc, &children, &number, depth, out);
+    for sub in page["toctree"].as_array().into_iter().flatten() {
+        if let Some(sub) = sub.as_str() {
+            n += 1;
+            let mut below = number.clone();
+            below.push(n);
+            number_page(sub, below, depth, pages, out, done);
+        }
+    }
+}
+
+/// Numbers `sections` below `number`; returns how many there are.
+fn number_sections(
+    doc: &str,
+    sections: &[Value],
+    number: &[u32],
+    depth: usize,
+    out: &mut BTreeMap<String, BTreeMap<String, Vec<u32>>>,
+) -> u32 {
+    let mut n = 0;
+    for section in sections {
+        n += 1;
+        let mut own = number.to_vec();
+        own.push(n);
+        if own.len() > depth {
+            continue;
+        }
+        if let Some(id) = section["id"].as_str() {
+            out.entry(doc.to_owned())
+                .or_default()
+                .insert(id.to_owned(), own.clone());
+        }
+        let children = section["children"].as_array().cloned().unwrap_or_default();
+        number_sections(doc, &children, &own, depth, out);
+    }
+    n
+}
+
+/// Puts each numbered section's number before its title: `1.2. Title`.
+fn number_headings(nodes: &mut [Node], numbers: &BTreeMap<String, Vec<u32>>) {
+    for node in nodes {
+        if let Node::Section(section) = node
+            && let Some(number) = section.id.as_ref().and_then(|id| numbers.get(id))
+            && let Some(Node::Heading(heading)) = section.children.first_mut()
+        {
+            let number: Vec<String> = number.iter().map(u32::to_string).collect();
+            heading
+                .children
+                .insert(0, text(format!("{}. ", number.join("."))));
+        }
+        if let Some(children) = node.children_mut() {
+            number_headings(children, numbers);
+        }
+    }
+}
+
+/// The title of section `id` in a collected section tree.
+fn section_title(sections: &Value, id: &str) -> Option<String> {
+    for section in sections.as_array()? {
+        if section["id"] == id {
+            return section["title"].as_str().map(str::to_owned);
+        }
+        if let Some(title) = section_title(&section["children"], id) {
+            return Some(title);
+        }
+    }
+    None
+}
+
+/// The index page, from every page's index entries, if there are any.
+pub(crate) fn genindex(collected: &Value) -> Option<Document> {
+    /// An entry: its name, its targets (page, anchor, main) and its
+    /// subentries.
+    #[derive(Default)]
+    struct Entry {
+        name: String,
+        targets: Vec<(String, String, bool)>,
+        subs: BTreeMap<String, Entry>,
+    }
+    let mut letters: BTreeMap<String, BTreeMap<String, Entry>> = BTreeMap::new();
+    let pages = collected.as_object()?;
+    for (source, page) in pages {
+        for e in page["index"].as_array().into_iter().flatten() {
+            let kind = e["type"].as_str().unwrap_or("single");
+            let value = e["value"].as_str().unwrap_or_default();
+            let anchor = e["anchor"].as_str().unwrap_or_default();
+            let main = e["main"].as_bool().unwrap_or(false);
+            let parts: Vec<&str> = value.split(';').map(str::trim).collect();
+            let get = |i: usize| parts.get(i).copied().unwrap_or_default();
+            // (entry, subentry, linked)
+            let made: Vec<(String, Option<String>, bool)> = match kind {
+                "pair" => vec![
+                    (get(0).into(), Some(get(1).into()), true),
+                    (get(1).into(), Some(get(0).into()), true),
+                ],
+                "triple" => vec![
+                    (get(0).into(), Some(format!("{} {}", get(1), get(2))), true),
+                    (get(1).into(), Some(format!("{}, {}", get(2), get(0))), true),
+                    (get(2).into(), Some(format!("{} {}", get(0), get(1))), true),
+                ],
+                "see" => vec![(get(0).into(), Some(format!("see {}", get(1))), false)],
+                "seealso" => vec![(get(0).into(), Some(format!("see also {}", get(1))), false)],
+                _ => vec![(
+                    get(0).into(),
+                    (parts.len() > 1).then(|| parts[1..].join("; ")),
+                    true,
+                )],
+            };
+            for (name, sub, linked) in made {
+                let letter = match name.chars().next() {
+                    Some(c) if c.is_alphabetic() => c.to_uppercase().collect(),
+                    _ => "Symbols".to_owned(),
+                };
+                let entry = letters
+                    .entry(letter)
+                    .or_default()
+                    .entry(name.to_lowercase())
+                    .or_default();
+                entry.name.clone_from(&name);
+                let target = (source.clone(), anchor.to_owned(), main);
+                match sub {
+                    Some(sub) => {
+                        let s = entry.subs.entry(sub.to_lowercase()).or_default();
+                        s.name = sub;
+                        if linked {
+                            s.targets.push(target);
+                        }
+                    }
+                    None if linked => entry.targets.push(target),
+                    None => {}
+                }
+            }
+        }
+    }
+    if letters.is_empty() {
+        return None;
+    }
+    fn line(entry: &Entry) -> Node {
+        let link = |(doc, anchor, main): &(String, String, bool), label: Node| {
+            let label = if *main {
+                Node::Strong(Strong {
+                    span: None,
+                    children: vec![label],
+                })
+            } else {
+                label
+            };
+            Node::Link(Link {
+                span: None,
+                url: format!("{}#{anchor}", relative_path(GENINDEX, doc)),
+                title: None,
+                target: Some(LinkTarget {
+                    document: Some(doc.clone()),
+                    anchor: Some(anchor.clone()),
+                    label: None,
+                }),
+                children: vec![label],
+            })
+        };
+        let mut inlines = Vec::new();
+        match entry.targets.split_first() {
+            Some((first, rest)) => {
+                inlines.push(link(first, text(&entry.name)));
+                for (i, target) in rest.iter().enumerate() {
+                    inlines.push(text(", "));
+                    inlines.push(link(target, text(format!("[{}]", i + 2))));
+                }
+            }
+            None => inlines.push(text(&entry.name)),
+        }
+        let mut children = vec![Node::Paragraph(Paragraph {
+            span: None,
+            children: inlines,
+        })];
+        if !entry.subs.is_empty() {
+            children.push(list(entry.subs.values().map(line).collect()));
+        }
+        Node::ListItem(ListItem {
+            span: None,
+            checked: None,
+            children,
+        })
+    }
+    let mut body = vec![Node::Heading(lsdocs_plugin_sdk::doctree::Heading {
+        span: None,
+        level: 1,
+        id: None,
+        children: vec![text("Index")],
+    })];
+    // Letters first, then symbols.
+    let (symbols, letters): (Vec<_>, Vec<_>) = letters
+        .into_iter()
+        .partition(|(letter, _)| letter == "Symbols");
+    for (letter, entries) in letters.into_iter().chain(symbols) {
+        body.push(Node::Section(lsdocs_plugin_sdk::doctree::Section {
+            span: None,
+            id: None,
+            children: vec![
+                Node::Heading(lsdocs_plugin_sdk::doctree::Heading {
+                    span: None,
+                    level: 2,
+                    id: None,
+                    children: vec![text(letter)],
+                }),
+                list(entries.values().map(line).collect()),
+            ],
+        }));
+    }
+    let mut document = Document::new(GENINDEX);
+    document.metadata.insert("title".into(), json!("Index"));
+    document.metadata.insert("nav_exclude".into(), json!(true));
+    document.children = vec![Node::Section(lsdocs_plugin_sdk::doctree::Section {
+        span: None,
+        id: Some("genindex".into()),
+        children: body,
+    })];
+    Some(document)
 }
 
 /// A `custom` inline node.

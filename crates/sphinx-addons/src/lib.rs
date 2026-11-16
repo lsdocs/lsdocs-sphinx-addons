@@ -28,8 +28,9 @@
 //! | `centered` | A `custom:centered` node with a bold paragraph. |
 //! | `hlist` | A `custom:hlist` node whose children are the columns: the bullet list in its content, split. |
 //! | `glossary` | A `custom:glossary` node around the definition list in its content; each term gets an id (`term-<term>`) for `term` references. `:sorted:` sorts it. |
-//! | `toctree` | A `custom:toctree` node with a nested list of links to the documents it names (their titles, and their sections to `:maxdepth:`), unless `:hidden:`. `:glob:`, `:caption:`, `:titlesonly:` and `:reversed:` work as in Sphinx. |
-//! | `index` | An anchor (the generated index is not done yet). |
+//! | `toctree` | A `custom:toctree` node with a nested list of links to the documents it names (their titles, and their sections to `:maxdepth:`), unless `:hidden:`. `:glob:`, `:caption:`, `:titlesonly:` and `:reversed:` work as in Sphinx. The pages a page's toctrees name (hidden ones too) become its `nav_children`, which `transform-nav` follows; `:numbered:` numbers their sections (`1.2. Title`), with the pages each one's toctrees name after its sections. |
+//! | `index` | An anchor, and index entries (`single`, `pair`, `triple`, `see`, `seealso`; `!` for main entries) for the generated index page, `genindex.md`. |
+//! | `rubric` | A `custom:rubric` paragraph, or heading with `:heading-level:` (as `html_tag`). |
 //! | `math` | Display math; with `:label:` (or the `math_number_all` option) it is numbered (`\tag{n}`) and gets the id `equation-<label>` for `eq`. |
 //! | `sectionauthor`, `codeauthor` | A paragraph naming the author if `show_authors` is on; nothing otherwise. |
 //! | `acks` | A `custom:acks` node with its content. |
@@ -52,7 +53,7 @@
 //! | `command`, `program` | Strong text. |
 //! | `dfn`, `mailheader`, `mimetype`, `newsgroup`, `manpage` | Emphasized text; `manpage` links to `manpages_url` if set. |
 //! | `makevar`, `regexp` | Inline code. |
-//! | `index` | The text, with an anchor. |
+//! | `index` | The text, with an anchor and an index entry. |
 //! | the `extlinks` names | Links built from a URL pattern, as `sphinx.ext.extlinks` does. |
 //!
 //! `custom` inlines have the attribute `inline: true` (and `html_tag`,
@@ -73,6 +74,12 @@
 //! | `show_authors` | `false` | Show `sectionauthor` and `codeauthor`. |
 //! | `manpages_url` | none | URL pattern for `manpage` (`{page}`, `{section}`, `{path}`). |
 //! | `extlinks` | `{}` | Roles making links: `{ issue = { url = "https://example.com/issues/%s", caption = "#%s" } }`. |
+//! | `toctree_nav` | `true` | Set `nav_children` from toctrees. |
+//!
+//! If any page has index entries, the plugin generates the index page,
+//! `genindex.md` (`genindex.html`): entries by letter, with links to where
+//! they are. `` :ref:`genindex` ``, `` :doc:`genindex` `` and a `genindex`
+//! toctree entry link to it.
 //!
 //! Domains (`py:function` and the like) are not here: they belong to the
 //! API documentation framework.
@@ -88,7 +95,7 @@ use lsdocs_plugin_sdk::doctree::{Document, Span};
 use lsdocs_plugin_sdk::protocol::{
     ArgumentSyntax, ContentSyntax, Diagnostic, DirectiveSyntax, InitializeParams, OptionSyntax,
     RoleSyntax, Severity, Syntax, TransformApplyParams, TransformApplyResult,
-    TransformCollectParams, TransformCollectResult,
+    TransformCollectParams, TransformCollectResult, TransformCollectedResult,
 };
 use lsdocs_plugin_sdk::{Context, Plugin, PluginError, PluginResult, Transformer};
 use serde::Deserialize;
@@ -123,6 +130,7 @@ pub(crate) struct Options {
     pub show_authors: bool,
     pub manpages_url: Option<String>,
     pub extlinks: BTreeMap<String, ExtLink>,
+    pub toctree_nav: bool,
 }
 
 /// An `extlinks` entry.
@@ -149,6 +157,7 @@ impl Default for Options {
             show_authors: false,
             manpages_url: None,
             extlinks: BTreeMap::new(),
+            toctree_nav: true,
         }
     }
 }
@@ -350,6 +359,17 @@ pub(crate) fn syntax(options: &Options) -> Syntax {
     directives.push(DirectiveSyntax {
         required_arguments: 1,
         final_argument_whitespace: true,
+        argument: ArgumentSyntax::Inline,
+        options: option_kinds([
+            ("class", Value),
+            ("name", Required),
+            ("heading-level", Required),
+        ]),
+        ..directive("rubric")
+    });
+    directives.push(DirectiveSyntax {
+        required_arguments: 1,
+        final_argument_whitespace: true,
         ..directive("tabularcolumns")
     });
     let mut roles: Vec<RoleSyntax> = roles::NAMES
@@ -405,6 +425,17 @@ impl Transformer for SphinxAddons {
         })
     }
 
+    async fn generate(
+        &self,
+        collected: &Value,
+        _ctx: &Context,
+    ) -> PluginResult<TransformCollectedResult> {
+        Ok(TransformCollectedResult {
+            documents: roles::genindex(collected).into_iter().collect(),
+            diagnostics: Vec::new(),
+        })
+    }
+
     async fn apply(
         &self,
         params: TransformApplyParams,
@@ -412,7 +443,20 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<TransformApplyResult> {
         let options = Options::read(ctx.options())?;
         let mut document = params.document;
-        let (_, mut diagnostics) = expand(&mut document, &options, ctx);
+        let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
+        // The pages toctrees name are this page's children in the
+        // navigation (`transform-nav`), unless the page says otherwise.
+        if options.toctree_nav && !notes.toctree.is_empty() {
+            let children: Vec<Value> = notes
+                .toctree
+                .iter()
+                .map(|source| Value::String(format!("/{source}")))
+                .collect();
+            document
+                .metadata
+                .entry("nav_children".to_owned())
+                .or_insert(Value::Array(children));
+        }
         let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         site.resolve(&mut document, &mut diagnostics);
         Ok(TransformApplyResult {

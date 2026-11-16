@@ -25,6 +25,12 @@ pub(crate) struct Notes {
     pub todos: Vec<Value>,
     /// Documents named by toctrees, hidden or not, in order.
     pub toctree: Vec<String>,
+    /// Each toctree: the documents it names and how deep `:numbered:`
+    /// numbers them (0 for not at all).
+    pub toctrees: Vec<Value>,
+    /// Index entries: `type`, `value`, `main` and the `anchor` they point
+    /// to.
+    pub index: Vec<Value>,
 }
 
 /// A directive's parts, as the parsers make them.
@@ -120,6 +126,7 @@ const DIRECTIVES: &[&str] = &[
     "codeauthor",
     "acks",
     "tabularcolumns",
+    "rubric",
 ];
 
 impl<'a> Expand<'a> {
@@ -150,6 +157,29 @@ impl<'a> Expand<'a> {
                 Node::Custom(c) if DIRECTIVES.contains(&c.kind.as_str()) => {
                     let parts = Parts::new(c);
                     out.extend(self.directive(parts));
+                }
+                // The `index` role makes entries, like the directive.
+                Node::Custom(c)
+                    if c.kind == "role"
+                        && c.attrs.get("name").and_then(Value::as_str) == Some("index") =>
+                {
+                    let raw = c
+                        .attrs
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let (title, target) = crate::roles::split_title(raw);
+                    let id = self.index_anchor(None);
+                    let entries = match &title {
+                        Some(_) => index_entries(&target, true),
+                        None => vec![("single".to_owned(), target.clone(), false)],
+                    };
+                    self.add_index_entries(entries, &id, c.span);
+                    out.push(anchor(&id));
+                    out.push(Node::Text(lsdocs_plugin_sdk::doctree::Text {
+                        span: c.span,
+                        value: title.unwrap_or(target),
+                    }));
                 }
                 Node::CodeBlock(mut code) => {
                     if code.language.is_none() {
@@ -265,12 +295,40 @@ impl<'a> Expand<'a> {
             "glossary" => self.glossary(&d, children),
             "toctree" => self.toctree(&d),
             "index" => {
-                self.indexes += 1;
-                let id = match d.option("name") {
-                    Some(name) => lsdocs_rst::make_id(name),
-                    None => format!("index-{}", self.indexes - 1),
-                };
+                let id = self.index_anchor(d.option("name"));
+                let mut text = d.argument.clone();
+                if let Some(content) = &d.content {
+                    text.push('\n');
+                    text.push_str(content);
+                }
+                let entries = index_entries(&text, true);
+                self.add_index_entries(entries, &id, d.span);
                 vec![anchor(&id)]
+            }
+            "rubric" => {
+                let tag = match d.option("heading-level").map(str::trim) {
+                    None => "p".to_owned(),
+                    Some(level @ ("1" | "2" | "3" | "4" | "5" | "6")) => format!("h{level}"),
+                    Some(other) => {
+                        self.warn(
+                            d.span,
+                            format!("rubric: :heading-level: must be 1 to 6, not {other:?}"),
+                        );
+                        "p".to_owned()
+                    }
+                };
+                let mut node = Custom {
+                    span: d.span,
+                    kind: "rubric".into(),
+                    attrs: BTreeMap::new(),
+                    children: std::mem::take(&mut d.argument_nodes),
+                };
+                node.attrs.insert("html_tag".into(), json!(tag));
+                if let Some(name) = d.option("name") {
+                    node.attrs
+                        .insert("id".into(), json!(lsdocs_rst::make_id(name)));
+                }
+                vec![Node::Custom(node)]
             }
             "math" => self.math(&d),
             "sectionauthor" | "codeauthor" => {
@@ -661,15 +719,16 @@ impl<'a> Expand<'a> {
                     );
                 }
                 for source in matched {
-                    self.notes.toctree.push(source.clone());
                     entries.push(json!({"document": source}));
                 }
                 continue;
             }
             match crate::roles::find_document(&docs, &self.source, &target) {
                 Some(source) => {
-                    self.notes.toctree.push(source.clone());
                     entries.push(json!({"title": title, "document": source}));
+                }
+                None if target == "genindex" => {
+                    entries.push(json!({"title": title, "document": crate::roles::GENINDEX}));
                 }
                 None => self.warn(
                     d.span,
@@ -680,6 +739,21 @@ impl<'a> Expand<'a> {
         if d.flag("reversed") {
             entries.reverse();
         }
+        let named: Vec<String> = entries
+            .iter()
+            .filter_map(|e| e["document"].as_str())
+            .filter(|s| *s != crate::roles::GENINDEX)
+            .map(str::to_owned)
+            .collect();
+        let numbered = match d.option("numbered").map(str::trim) {
+            None => 0,
+            Some("") => 999,
+            Some(n) => n.parse::<u32>().unwrap_or(999),
+        };
+        self.notes.toctree.extend(named.iter().cloned());
+        self.notes
+            .toctrees
+            .push(json!({"entries": named, "numbered": numbered}));
         if d.flag("hidden") {
             return Vec::new();
         }
@@ -699,6 +773,41 @@ impl<'a> Expand<'a> {
             attrs,
             children: Vec::new(),
         })]
+    }
+
+    /// The id of the next index anchor: `name` made an id, or `index-<n>`.
+    fn index_anchor(&mut self, name: Option<&str>) -> String {
+        self.indexes += 1;
+        match name {
+            Some(name) => lsdocs_rst::make_id(name),
+            None => format!("index-{}", self.indexes - 1),
+        }
+    }
+
+    fn add_index_entries(
+        &mut self,
+        entries: Vec<(String, String, bool)>,
+        anchor: &str,
+        span: Option<Span>,
+    ) {
+        for (kind, value, main) in entries {
+            let parts = value.split(';').filter(|p| !p.trim().is_empty()).count();
+            let needed = match kind.as_str() {
+                "pair" | "see" | "seealso" => 2,
+                "triple" => 3,
+                _ => 1,
+            };
+            if parts < needed || (kind != "single" && parts > needed) {
+                self.warn(span, format!("invalid {kind} index entry {value:?}"));
+                continue;
+            }
+            self.notes.index.push(json!({
+                "type": kind,
+                "value": value,
+                "main": main,
+                "anchor": anchor,
+            }));
+        }
     }
 
     fn math(&mut self, d: &Parts) -> Vec<Node> {
@@ -775,6 +884,41 @@ fn strip_prefix(mut nodes: Vec<Node>, prefix: &str) -> Vec<Node> {
         }
     }
     nodes
+}
+
+/// Index entries in Sphinx's syntax, one per line: `type: value` (types
+/// `single`, `pair`, `triple`, `see`, `seealso`; `!` before marks a main
+/// entry), or values without a type, separated by commas (`single`
+/// entries) if `split` is set.
+pub(crate) fn index_entries(text: &str, split: bool) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let (main, line) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, line),
+        };
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((kind, value)) = line.split_once(':')
+            && matches!(
+                kind.trim(),
+                "single" | "pair" | "triple" | "see" | "seealso"
+            )
+        {
+            out.push((kind.trim().to_owned(), value.trim().to_owned(), main));
+            continue;
+        }
+        if split {
+            for value in line.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                out.push(("single".to_owned(), value.to_owned(), main));
+            }
+        } else {
+            out.push(("single".to_owned(), line.to_owned(), main));
+        }
+    }
+    out
 }
 
 /// The line numbers (from 1) a Sphinx line spec such as `1,3-5,8-` picks
