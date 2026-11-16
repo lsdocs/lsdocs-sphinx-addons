@@ -64,7 +64,7 @@
 //!
 //! | Option | Default | Meaning |
 //! |---|---|---|
-//! | `file_access` | `true` | Let `literalinclude` read files. Results are not cached while it is on. |
+//! | `file_access` | `true` | Let `literalinclude` read files (the files read are the results' dependencies, for the cache). |
 //! | `tags` | `[]` | Tags `only` expressions may test. |
 //! | `todo_include_todos` | `false` | Show `todo` and `todolist`. |
 //! | `numfig` | `false` | Number figures, tables and code blocks with a caption, and let `numref` refer to them. |
@@ -106,10 +106,7 @@ pub fn plugin() -> Plugin {
     Plugin::new("sphinx-addons", env!("CARGO_PKG_VERSION"))
         .transformer(SphinxAddons)
         .syntax(|init: &InitializeParams| syntax(&Options::read(&init.options).unwrap_or_default()))
-        .cache_key(|init: &InitializeParams| {
-            let options = Options::read(&init.options).unwrap_or_default();
-            (!options.file_access).then(String::new)
-        })
+        .cacheable()
 }
 
 /// The transformer.
@@ -422,6 +419,7 @@ impl Transformer for SphinxAddons {
         Ok(TransformCollectResult {
             data: roles::collect(&document, &notes, &options),
             diagnostics: Vec::new(),
+            dependencies: notes.files,
         })
     }
 
@@ -433,6 +431,7 @@ impl Transformer for SphinxAddons {
         Ok(TransformCollectedResult {
             documents: roles::genindex(collected).into_iter().collect(),
             diagnostics: Vec::new(),
+            dependencies: Vec::new(),
         })
     }
 
@@ -462,6 +461,7 @@ impl Transformer for SphinxAddons {
         Ok(TransformApplyResult {
             document,
             diagnostics,
+            dependencies: notes.files,
         })
     }
 }

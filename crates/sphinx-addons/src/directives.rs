@@ -31,6 +31,8 @@ pub(crate) struct Notes {
     /// Index entries: `type`, `value`, `main` and the `anchor` they point
     /// to.
     pub index: Vec<Value>,
+    /// Files read (or looked for), the results' dependencies.
+    pub files: Vec<String>,
 }
 
 /// A directive's parts, as the parsers make them.
@@ -582,7 +584,7 @@ impl<'a> Expand<'a> {
 
     /// The file `path` names: relative to this document's directory, or
     /// to the source directory with a leading `/`.
-    fn resolve_file(&self, path: &str) -> Option<std::path::PathBuf> {
+    fn resolve_file(&mut self, path: &str) -> Option<std::path::PathBuf> {
         let dir = self.site.source_dir.as_deref()?;
         let relative = match path.strip_prefix('/') {
             Some(rest) => rest.to_owned(),
@@ -592,6 +594,10 @@ impl<'a> Expand<'a> {
             },
         };
         let file = Path::new(dir).join(relative);
+        // A dependency of the result, found or not.
+        self.notes
+            .files
+            .push(file.to_string_lossy().replace('\\', "/"));
         file.is_file().then_some(file)
     }
 
