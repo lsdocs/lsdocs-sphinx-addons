@@ -94,8 +94,8 @@ use std::collections::BTreeMap;
 use lsdocs_plugin_sdk::doctree::{Document, Span};
 use lsdocs_plugin_sdk::protocol::{
     ArgumentSyntax, ContentSyntax, Diagnostic, DirectiveSyntax, InitializeParams, OptionSyntax,
-    RoleSyntax, Severity, Syntax, TransformApplyParams, TransformApplyResult,
-    TransformCollectParams, TransformCollectResult, TransformCollectedResult,
+    ParseTransformAllResult, ParseTransformEachParams, ParseTransformEachResult,
+    RenderTransformEachParams, RenderTransformEachResult, RoleSyntax, Severity, Syntax,
 };
 use lsdocs_plugin_sdk::{Context, Plugin, PluginError, PluginResult, Transformer};
 use serde::Deserialize;
@@ -406,29 +406,29 @@ fn expand(
 }
 
 impl Transformer for SphinxAddons {
-    const COLLECTS: bool = true;
+    const READS: bool = true;
 
-    async fn collect(
+    async fn read(
         &self,
-        params: TransformCollectParams,
+        params: ParseTransformEachParams,
         ctx: &Context,
-    ) -> PluginResult<TransformCollectResult> {
+    ) -> PluginResult<ParseTransformEachResult> {
         let options = Options::read(ctx.options())?;
         let mut document = params.document;
         let (notes, _) = expand(&mut document, &options, ctx);
-        Ok(TransformCollectResult {
+        Ok(ParseTransformEachResult {
             data: roles::collect(&document, &notes, &options),
             diagnostics: Vec::new(),
             dependencies: notes.files,
         })
     }
 
-    async fn generate(
+    async fn conclude(
         &self,
         collected: &Value,
         _ctx: &Context,
-    ) -> PluginResult<TransformCollectedResult> {
-        Ok(TransformCollectedResult {
+    ) -> PluginResult<ParseTransformAllResult> {
+        Ok(ParseTransformAllResult {
             documents: roles::genindex(collected).into_iter().collect(),
             diagnostics: Vec::new(),
             dependencies: Vec::new(),
@@ -437,9 +437,9 @@ impl Transformer for SphinxAddons {
 
     async fn apply(
         &self,
-        params: TransformApplyParams,
+        params: RenderTransformEachParams,
         ctx: &Context,
-    ) -> PluginResult<TransformApplyResult> {
+    ) -> PluginResult<RenderTransformEachResult> {
         let options = Options::read(ctx.options())?;
         let mut document = params.document;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
@@ -458,7 +458,7 @@ impl Transformer for SphinxAddons {
         }
         let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         site.resolve(&mut document, &mut diagnostics);
-        Ok(TransformApplyResult {
+        Ok(RenderTransformEachResult {
             document,
             diagnostics,
             dependencies: notes.files,
