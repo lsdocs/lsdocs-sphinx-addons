@@ -34,15 +34,17 @@ async fn build_in(
         documents.push(doc);
     }
     names.sort();
-    let init = InitializeParams {
-        site: SiteInfo {
-            files: names,
-            source_dir: source_dir.map(str::to_owned),
-            ..SiteInfo::default()
+    let init = lsdocs_plugin_sdk::Setup::with_settings(
+        InitializeParams {
+            site: SiteInfo {
+                files: names,
+                source_dir: source_dir.map(str::to_owned),
+                ..SiteInfo::default()
+            },
+            ..InitializeParams::default()
         },
         options,
-        ..InitializeParams::default()
-    };
+    );
     run_transform(&plugin(), &init, documents).await.unwrap()
 }
 

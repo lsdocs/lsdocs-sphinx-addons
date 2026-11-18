@@ -93,19 +93,20 @@ use std::collections::BTreeMap;
 
 use lsdocs_plugin_sdk::doctree::{Document, Span};
 use lsdocs_plugin_sdk::protocol::{
-    ArgumentSyntax, ContentSyntax, Diagnostic, DirectiveSyntax, InitializeParams, OptionSyntax,
+    ArgumentSyntax, ContentSyntax, Diagnostic, DirectiveSyntax, OptionSyntax,
     ParseTransformAllResult, ParseTransformEachParams, ParseTransformEachResult,
     RenderTransformEachParams, RenderTransformEachResult, RoleSyntax, Severity, Syntax,
 };
-use lsdocs_plugin_sdk::{Context, Plugin, PluginError, PluginResult, Transformer};
+use lsdocs_plugin_sdk::{Context, Plugin, PluginError, PluginResult, Setup, Transformer};
 use serde::Deserialize;
 use serde_json::Value;
 
 /// The plugin, as registered with the host.
 pub fn plugin() -> Plugin {
     Plugin::new("sphinx-addons", env!("CARGO_PKG_VERSION"))
+        .settings(lsdocs_plugin_sdk::config::settings_toml_as::<Options>)
         .transformer(SphinxAddons)
-        .syntax(|init: &InitializeParams| syntax(&Options::read(&init.options).unwrap_or_default()))
+        .syntax(|setup: &Setup| syntax(&Options::read(&setup.settings).unwrap_or_default()))
         .cacheable()
 }
 
@@ -413,7 +414,7 @@ impl Transformer for SphinxAddons {
         params: ParseTransformEachParams,
         ctx: &Context,
     ) -> PluginResult<ParseTransformEachResult> {
-        let options = Options::read(ctx.options())?;
+        let options = Options::read(ctx.settings())?;
         let mut document = params.document;
         let (notes, _) = expand(&mut document, &options, ctx);
         Ok(ParseTransformEachResult {
@@ -440,7 +441,7 @@ impl Transformer for SphinxAddons {
         params: RenderTransformEachParams,
         ctx: &Context,
     ) -> PluginResult<RenderTransformEachResult> {
-        let options = Options::read(ctx.options())?;
+        let options = Options::read(ctx.settings())?;
         let mut document = params.document;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
         // The pages toctrees name are this page's children in the
