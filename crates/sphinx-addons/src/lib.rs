@@ -27,7 +27,6 @@
 //! | `only` | Its content if its tag expression is true (`html and not draft`); tags are `html`, `format_html`, `builder_html` and those of the `tags` option. |
 //! | `centered` | A `custom:centered` node with a bold paragraph. |
 //! | `hlist` | A `custom:hlist` node whose children are the columns: the bullet list in its content, split. |
-//! | `tab-set`, `tab-item` | A `custom:tab-set` node whose children are `custom:tab-item` nodes (as in sphinx-design); an item's argument is its label (the `label` attribute). Other options are accepted and ignored. |
 //! | `glossary` | A `custom:glossary` node around the definition list in its content; each term gets an id (`term-<term>`) for `term` references. `:sorted:` sorts it. |
 //! | `toctree` | A `custom:toctree` node with a nested list of links to the documents it names (their titles, and their sections to `:maxdepth:`), unless `:hidden:`. `:glob:`, `:caption:`, `:titlesonly:` and `:reversed:` work as in Sphinx. The pages a page's toctrees name (hidden ones too) become its `nav_children`, which `transform-nav` follows; `:numbered:` numbers their sections (`1.2. Title`), with the pages each one's toctrees name after its sections. |
 //! | `index` | An anchor, and index entries (`single`, `pair`, `triple`, `see`, `seealso`; `!` for main entries) for the generated index page, `genindex.md`. |
@@ -302,24 +301,6 @@ pub(crate) fn syntax(options: &Options) -> Syntax {
         options: option_kinds([("columns", Required)]),
         content: blocks,
         ..directive("hlist")
-    });
-    directives.push(DirectiveSyntax {
-        options: option_kinds([("sync-group", Required), ("class", Value)]),
-        content: blocks,
-        ..directive("tab-set")
-    });
-    directives.push(DirectiveSyntax {
-        required_arguments: 1,
-        final_argument_whitespace: true,
-        options: option_kinds([
-            ("selected", Flag),
-            ("sync", Required),
-            ("name", Required),
-            ("class-label", Value),
-            ("class-content", Value),
-        ]),
-        content: blocks,
-        ..directive("tab-item")
     });
     directives.push(DirectiveSyntax {
         options: option_kinds([("sorted", Flag)]),

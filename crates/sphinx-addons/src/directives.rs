@@ -120,8 +120,6 @@ const DIRECTIVES: &[&str] = &[
     "only",
     "centered",
     "hlist",
-    "tab-set",
-    "tab-item",
     "glossary",
     "toctree",
     "index",
@@ -296,17 +294,6 @@ impl<'a> Expand<'a> {
                 d.span,
             )],
             "hlist" => self.hlist(&d, children),
-            "tab-set" => vec![custom("tab-set", children, d.span)],
-            "tab-item" => {
-                let mut node = Custom {
-                    span: d.span,
-                    kind: "tab-item".into(),
-                    attrs: BTreeMap::new(),
-                    children,
-                };
-                node.attrs.insert("label".into(), json!(d.argument.trim()));
-                vec![Node::Custom(node)]
-            }
             "glossary" => self.glossary(&d, children),
             "toctree" => self.toctree(&d),
             "index" => {
