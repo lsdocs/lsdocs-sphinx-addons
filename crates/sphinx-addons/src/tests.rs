@@ -598,3 +598,25 @@ async fn numbered_toctrees_and_navigation() {
     let (sub, _) = &out[3];
     assert_eq!(plain_text(&sub.children), "1.2. Sub");
 }
+
+#[tokio::test]
+async fn tab_sets_and_items() {
+    let t = same(
+        ".. tab-set::\n\n   .. tab-item:: Rust\n\n      First *tab*.\n\n   .. tab-item:: Python 3\n\n      Second tab.\n",
+        "````{tab-set}\n```{tab-item} Rust\nFirst *tab*.\n```\n\n```{tab-item} Python 3\nSecond tab.\n```\n````\n",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(t[0]["type"], "custom");
+    assert_eq!(t[0]["kind"], "tab-set");
+    let items = t[0]["children"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["kind"], "tab-item");
+    assert_eq!(items[0]["attrs"]["label"], "Rust");
+    assert_eq!(items[0]["children"][0]["children"][1]["type"], "emphasis");
+    assert_eq!(items[1]["attrs"]["label"], "Python 3");
+    assert_eq!(
+        items[1]["children"][0]["children"][0]["value"],
+        "Second tab."
+    );
+}
