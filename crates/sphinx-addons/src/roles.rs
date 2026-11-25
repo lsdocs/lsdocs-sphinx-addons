@@ -12,7 +12,8 @@ use lsdocs_plugin_sdk::protocol::Diagnostic;
 use lsdocs_plugin_sdk::relative_path;
 use serde_json::{Value, json};
 
-use crate::{Options, directives::Notes, warning};
+use crate::directives::{Notes, glob};
+use crate::{Options, warning};
 
 /// The roles handled here (besides the `extlinks` ones).
 pub(crate) const NAMES: &[&str] = &[
@@ -44,9 +45,6 @@ pub(crate) const NAMES: &[&str] = &[
 /// The source path of the generated index page.
 pub(crate) const GENINDEX: &str = "genindex.md";
 
-/// Extensions of the files `doc` and `toctree` take as documents.
-const DOCUMENT_EXTENSIONS: &[&str] = &["rst", "rest", "md", "markdown"];
-
 /// `text <target>`: the text (if any) and the target.
 pub(crate) fn split_title(text: &str) -> (Option<String>, String) {
     let text = text.trim();
@@ -61,16 +59,18 @@ pub(crate) fn split_title(text: &str) -> (Option<String>, String) {
     (None, text.to_owned())
 }
 
-/// The site's documents: their names (paths without the extension) and
-/// source paths.
-pub(crate) fn documents(files: &[String]) -> Vec<(String, String)> {
-    files
-        .iter()
-        .filter_map(|f| {
-            let (name, ext) = f.rsplit_once('.')?;
-            DOCUMENT_EXTENSIONS
-                .contains(&ext.to_lowercase().as_str())
-                .then(|| (name.to_owned(), f.clone()))
+/// The site's documents, from their source paths (the files parsers
+/// took, whatever their extension): their names (paths without the
+/// extension) and source paths.
+fn documents<'s>(sources: impl IntoIterator<Item = &'s str>) -> Vec<(String, String)> {
+    sources
+        .into_iter()
+        .map(|source| {
+            let name = match source.rsplit_once('.') {
+                Some((name, _)) if !name.is_empty() && !name.ends_with('/') => name,
+                _ => source,
+            };
+            (name.to_owned(), source.to_owned())
         })
         .collect()
 }
@@ -215,7 +215,6 @@ pub(crate) fn collect(document: &Document, notes: &Notes, _options: &Options) ->
         "numbers": numbers,
         "todos": notes.todos,
         "sections": sections(&document.children),
-        "toctree": notes.toctree,
         "toctrees": notes.toctrees,
         "index": notes.index,
     })
@@ -225,7 +224,10 @@ pub(crate) fn collect(document: &Document, notes: &Notes, _options: &Options) ->
 pub(crate) struct Site<'a> {
     /// The collected data of every document, by source.
     pages: BTreeMap<&'a str, &'a Value>,
+    /// The site's documents: the ones collected from.
     docs: Vec<(String, String)>,
+    /// The toctrees of each document, resolved.
+    trees: BTreeMap<&'a str, Vec<Tree>>,
     files: BTreeSet<&'a str>,
     options: &'a Options,
     /// Section numbers from numbered toctrees, by document and section id.
@@ -236,22 +238,55 @@ pub(crate) struct Site<'a> {
 
 impl<'a> Site<'a> {
     pub fn new(collected: &'a Value, files: &'a [String], options: &'a Options) -> Self {
-        let pages = collected
+        let pages: BTreeMap<&str, &Value> = collected
             .as_object()
             .map(|m| m.iter().map(|(k, v)| (k.as_str(), v)).collect())
             .unwrap_or_default();
-        let numbers = section_numbers(&pages);
+        let docs = documents(pages.keys().copied());
         let has_index = pages
             .values()
             .any(|p| p["index"].as_array().is_some_and(|a| !a.is_empty()));
+        let trees = pages
+            .iter()
+            .map(|(source, page)| {
+                let trees = page["toctrees"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|tree| Tree {
+                        documents: resolve_entries(
+                            &docs,
+                            source,
+                            tree["entries"].as_array().map_or(&[], Vec::as_slice),
+                            tree["reversed"].as_bool().unwrap_or(false),
+                            &mut |_| {},
+                        )
+                        .iter()
+                        .filter_map(|e| e["document"].as_str())
+                        .filter(|d| *d != GENINDEX)
+                        .map(str::to_owned)
+                        .collect(),
+                        numbered: tree["numbered"].as_u64().unwrap_or(0),
+                    })
+                    .collect();
+                (*source, trees)
+            })
+            .collect();
+        let numbers = section_numbers(&pages, &trees);
         Self {
             pages,
-            docs: documents(files),
+            docs,
+            trees,
             files: files.iter().map(String::as_str).collect(),
             options,
             numbers,
             has_index,
         }
+    }
+
+    /// The documents the toctrees of `doc` name, hidden or not, in order.
+    pub fn toctree_documents(&self, doc: &str) -> Vec<&str> {
+        toctree_documents(&self.trees, doc)
     }
 
     /// The number of section `id` in `doc`, as `1.2`, if it has one.
@@ -345,7 +380,7 @@ impl<'a> Site<'a> {
             match node {
                 Node::Custom(c) if c.kind == "role" => result.extend(self.role(&c, source, out)),
                 Node::Custom(c) if c.kind == "toctree" && c.children.is_empty() => {
-                    result.extend(self.toctree(&c, source));
+                    result.extend(self.toctree(&c, source, out));
                 }
                 Node::Custom(c) if c.kind == "todolist" && c.children.is_empty() => {
                     result.extend(self.todolist(source, c.span));
@@ -686,8 +721,25 @@ impl<'a> Site<'a> {
         vec![self.link_to(source, doc, Some(&label), vec![text(label_text)], span)]
     }
 
-    /// A toctree's list of links, from the placeholder `Expand` made.
-    fn toctree(&self, c: &Custom, source: &str) -> Vec<Node> {
+    /// A toctree's list of links, from the placeholder `Expand` made
+    /// (nothing for a hidden one, whose entries are still checked).
+    fn toctree(&self, c: &Custom, source: &str, out: &mut Vec<Diagnostic>) -> Vec<Node> {
+        let entries = resolve_entries(
+            &self.docs,
+            source,
+            c.attrs
+                .get("entries")
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice),
+            c.attrs
+                .get("reversed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            &mut |message| out.push(warning(c.span, message)),
+        );
+        if c.attrs.contains_key("hidden") {
+            return Vec::new();
+        }
         let maxdepth = c
             .attrs
             .get("maxdepth")
@@ -697,12 +749,6 @@ impl<'a> Site<'a> {
             .map_or(usize::MAX, |d| usize::try_from(d).unwrap_or(usize::MAX));
         let titles_only = c.attrs.contains_key("titlesonly");
         let mut items = Vec::new();
-        let entries = c
-            .attrs
-            .get("entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
         for entry in &entries {
             let title = entry["title"].as_str();
             if let Some(url) = entry["url"].as_str() {
@@ -805,20 +851,8 @@ impl<'a> Site<'a> {
             };
             below.extend(self.section_items(from, doc, &sections, depth + 1, maxdepth));
         }
-        if let Some(page) = page {
-            for sub in page["toctree"].as_array().into_iter().flatten() {
-                if let Some(sub) = sub.as_str() {
-                    below.push(self.toc_entry(
-                        from,
-                        sub,
-                        None,
-                        depth + 1,
-                        maxdepth,
-                        titles_only,
-                        visited,
-                    ));
-                }
-            }
+        for sub in self.toctree_documents(doc) {
+            below.push(self.toc_entry(from, sub, None, depth + 1, maxdepth, titles_only, visited));
         }
         item(link, (!below.is_empty()).then(|| list(below)))
     }
@@ -882,17 +916,85 @@ impl<'a> Site<'a> {
     }
 }
 
+/// A toctree, resolved: the documents it names and how deep `:numbered:`
+/// numbers them (0 for not at all).
+pub(crate) struct Tree {
+    documents: Vec<String>,
+    numbered: u64,
+}
+
+/// The documents the toctrees of `doc` name, hidden or not, in order.
+fn toctree_documents<'t>(trees: &'t BTreeMap<&str, Vec<Tree>>, doc: &str) -> Vec<&'t str> {
+    trees
+        .get(doc)
+        .into_iter()
+        .flatten()
+        .flat_map(|t| t.documents.iter().map(String::as_str))
+        .collect()
+}
+
+/// Resolves the entries of a toctree in `from`, as `Expand` wrote them,
+/// against the site's documents `docs`: each becomes `{title, url}` or
+/// `{title, document}` (a glob, one per document it matches, in order).
+/// Calls `warn` for each entry that names no document.
+fn resolve_entries(
+    docs: &[(String, String)],
+    from: &str,
+    entries: &[Value],
+    reversed: bool,
+    warn: &mut dyn FnMut(String),
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let title = &entry["title"];
+        if entry.get("url").is_some() {
+            out.push(entry.clone());
+        } else if let Some(target) = entry["glob"].as_str() {
+            let pattern = absolute(from, target);
+            let mut matched: Vec<&String> = docs
+                .iter()
+                .filter(|(name, source)| source != from && glob(&pattern, name))
+                .map(|(_, source)| source)
+                .collect();
+            matched.sort();
+            if matched.is_empty() {
+                warn(format!(
+                    "toctree glob pattern {target:?} didn't match any documents"
+                ));
+            }
+            out.extend(matched.into_iter().map(|s| json!({"document": s})));
+        } else if let Some(target) = entry["target"].as_str() {
+            match find_document(docs, from, target) {
+                Some(source) => out.push(json!({"title": title, "document": source})),
+                None if target == "genindex" => {
+                    out.push(json!({"title": title, "document": GENINDEX}));
+                }
+                None => warn(format!(
+                    "toctree contains reference to nonexisting document {target:?}"
+                )),
+            }
+        }
+    }
+    if reversed {
+        out.reverse();
+    }
+    out
+}
+
 /// Section numbers from numbered toctrees: for each toctree with
 /// `:numbered:`, its pages are numbered 1, 2, ... (below the number of the
 /// page holding it, if that has one), their sections below that, and the
 /// pages their own toctrees name after their sections, as deep as
 /// `:numbered:` says.
-fn section_numbers(pages: &BTreeMap<&str, &Value>) -> BTreeMap<String, BTreeMap<String, Vec<u32>>> {
+fn section_numbers(
+    pages: &BTreeMap<&str, &Value>,
+    trees: &BTreeMap<&str, Vec<Tree>>,
+) -> BTreeMap<String, BTreeMap<String, Vec<u32>>> {
     let mut out: BTreeMap<String, BTreeMap<String, Vec<u32>>> = BTreeMap::new();
     let mut done = BTreeSet::new();
     for (source, page) in pages {
-        for tree in page["toctrees"].as_array().into_iter().flatten() {
-            let depth = tree["numbered"].as_u64().unwrap_or(0);
+        for tree in trees.get(source).into_iter().flatten() {
+            let depth = tree.numbered;
             if depth == 0 {
                 continue;
             }
@@ -905,14 +1007,19 @@ fn section_numbers(pages: &BTreeMap<&str, &Value>) -> BTreeMap<String, BTreeMap<
                 .and_then(|id| out.get(*source)?.get(id).cloned())
                 .unwrap_or_default();
             let mut n = 0;
-            for entry in tree["entries"].as_array().into_iter().flatten() {
-                let Some(doc) = entry.as_str() else {
-                    continue;
-                };
+            for doc in &tree.documents {
                 n += 1;
                 let mut number = prefix.clone();
                 number.push(n);
-                number_page(doc, number, depth as usize, pages, &mut out, &mut done);
+                number_page(
+                    doc,
+                    number,
+                    depth as usize,
+                    pages,
+                    trees,
+                    &mut out,
+                    &mut done,
+                );
             }
         }
     }
@@ -924,6 +1031,7 @@ fn number_page(
     number: Vec<u32>,
     depth: usize,
     pages: &BTreeMap<&str, &Value>,
+    trees: &BTreeMap<&str, Vec<Tree>>,
     out: &mut BTreeMap<String, BTreeMap<String, Vec<u32>>>,
     done: &mut BTreeSet<String>,
 ) {
@@ -946,13 +1054,11 @@ fn number_page(
         _ => sections,
     };
     let mut n = number_sections(doc, &children, &number, depth, out);
-    for sub in page["toctree"].as_array().into_iter().flatten() {
-        if let Some(sub) = sub.as_str() {
-            n += 1;
-            let mut below = number.clone();
-            below.push(n);
-            number_page(sub, below, depth, pages, out, done);
-        }
+    for sub in toctree_documents(trees, doc) {
+        n += 1;
+        let mut below = number.clone();
+        below.push(n);
+        number_page(sub, below, depth, pages, trees, out, done);
     }
 }
 

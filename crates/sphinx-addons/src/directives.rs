@@ -23,10 +23,9 @@ pub(crate) struct Notes {
     pub equations: BTreeMap<String, u32>,
     /// Todos: their anchor and content.
     pub todos: Vec<Value>,
-    /// Documents named by toctrees, hidden or not, in order.
-    pub toctree: Vec<String>,
-    /// Each toctree: the documents it names and how deep `:numbered:`
-    /// numbers them (0 for not at all).
+    /// Each toctree, hidden or not: its entries as written (`Site`
+    /// resolves them), how deep `:numbered:` numbers them (0 for not at
+    /// all) and whether it is `:reversed:`.
     pub toctrees: Vec<Value>,
     /// Index entries: `type`, `value`, `main` and the `anchor` they point
     /// to.
@@ -695,10 +694,11 @@ impl<'a> Expand<'a> {
         vec![custom("glossary", out, d.span)]
     }
 
-    /// A toctree: a placeholder holding its entries, made into links once
-    /// every document is known (`Site::resolve`).
+    /// A toctree: a placeholder holding its entries as written, resolved
+    /// and made into links once every document is known
+    /// (`Site::resolve`), since only the apply pass knows which files
+    /// parsers took.
     fn toctree(&mut self, d: &Parts) -> Vec<Node> {
-        let docs = crate::roles::documents(&self.site.files);
         let mut entries = Vec::new();
         for line in d.content.as_deref().unwrap_or_default().lines() {
             let line = line.trim();
@@ -708,63 +708,30 @@ impl<'a> Expand<'a> {
             let (title, target) = crate::roles::split_title(line);
             if target == "self" || target.contains("://") || target.starts_with("mailto:") {
                 entries.push(json!({"title": title, "url": target}));
-                continue;
-            }
-            if d.flag("glob") && title.is_none() && target.contains(['*', '?', '[']) {
-                let pattern = crate::roles::absolute(&self.source, &target);
-                let mut matched: Vec<&String> = docs
-                    .iter()
-                    .filter(|(name, source)| **source != self.source && glob(&pattern, name))
-                    .map(|(_, source)| source)
-                    .collect();
-                matched.sort();
-                if matched.is_empty() {
-                    self.warn(
-                        d.span,
-                        format!("toctree glob pattern {target:?} didn't match any documents"),
-                    );
-                }
-                for source in matched {
-                    entries.push(json!({"document": source}));
-                }
-                continue;
-            }
-            match crate::roles::find_document(&docs, &self.source, &target) {
-                Some(source) => {
-                    entries.push(json!({"title": title, "document": source}));
-                }
-                None if target == "genindex" => {
-                    entries.push(json!({"title": title, "document": crate::roles::GENINDEX}));
-                }
-                None => self.warn(
-                    d.span,
-                    format!("toctree contains reference to nonexisting document {target:?}"),
-                ),
+            } else if d.flag("glob") && title.is_none() && target.contains(['*', '?', '[']) {
+                entries.push(json!({"glob": target}));
+            } else {
+                entries.push(json!({"title": title, "target": target}));
             }
         }
-        if d.flag("reversed") {
-            entries.reverse();
-        }
-        let named: Vec<String> = entries
-            .iter()
-            .filter_map(|e| e["document"].as_str())
-            .filter(|s| *s != crate::roles::GENINDEX)
-            .map(str::to_owned)
-            .collect();
         let numbered = match d.option("numbered").map(str::trim) {
             None => 0,
             Some("") => 999,
             Some(n) => n.parse::<u32>().unwrap_or(999),
         };
-        self.notes.toctree.extend(named.iter().cloned());
-        self.notes
-            .toctrees
-            .push(json!({"entries": named, "numbered": numbered}));
-        if d.flag("hidden") {
-            return Vec::new();
-        }
+        let reversed = d.flag("reversed");
+        self.notes.toctrees.push(json!({
+            "entries": entries.clone(),
+            "numbered": numbered,
+            "reversed": reversed,
+        }));
         let mut attrs = BTreeMap::new();
         attrs.insert("entries".to_owned(), Value::Array(entries));
+        attrs.insert("reversed".to_owned(), json!(reversed));
+        if d.flag("hidden") {
+            // Shows nothing, but its entries are still checked.
+            attrs.insert("hidden".to_owned(), json!(true));
+        }
         for name in ["caption", "maxdepth", "name"] {
             if let Some(value) = d.option(name) {
                 attrs.insert(name.to_owned(), json!(value.trim()));
