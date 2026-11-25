@@ -9,7 +9,7 @@ the directives and roles Sphinx adds to docutils (code blocks and
 `toctree`, `math` labels, the index, and the cross-reference roles: `ref`,
 `doc`, `numref`, `term`, ...), in reStructuredText and in Markdown (MyST's
 syntax) alike, declared as syntax extensions. Its tests parse with
-lsdocs-parser-rst and lsdocs-parser-markdown.
+lsdocs-parser-rst and lsdocs-parser-markdown (its MyST dialect).
 
 Its settings and behavior are described in the lsdocs documentation
 (https://lsdocs.github.io, "sphinx-addons").

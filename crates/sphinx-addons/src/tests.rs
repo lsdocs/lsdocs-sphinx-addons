@@ -26,7 +26,7 @@ async fn build_in(
         let (doc, diagnostics) = if source.ends_with(".rst") {
             lsdocs_parser_rst::parse(source, text, None, &syntax)
         } else if source.ends_with(".md") {
-            lsdocs_parser_markdown::parse_with_syntax(source, text, &syntax)
+            lsdocs_parser_markdown::myst::parse_with_syntax(source, text, &syntax)
         } else {
             continue;
         };
