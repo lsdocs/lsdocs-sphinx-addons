@@ -16,9 +16,9 @@ Its settings and behavior are described in the lsdocs documentation
 
 ## Known limitations
 
-- Documents are found by extension (`.rst`, `.rest`, `.md`, `.markdown`)
-  for `doc` and `toctree`, since a transformer does not know which files
-  parsers took.
+- `doc` and `toctree` know the documents the plugin collected from: the
+  files parsers took, whatever their extension. A document the plugin's
+  `files` patterns leave out is not one of them, so it cannot be named.
 - Not supported: `literalinclude`'s `:pyobject:` and `:diff:`, encodings
   other than UTF-8; compound keys in `kbd` (`Ctrl+C` is one key); several
   terms for one glossary entry (in reStructuredText the content is a
@@ -28,7 +28,6 @@ Its settings and behavior are described in the lsdocs documentation
 
 ## TODO
 
-- [ ] Know which files parsers took, instead of guessing by extension.
 - [ ] `literalinclude`'s `:pyobject:` and `:diff:`; other encodings.
 - [ ] Compound `kbd` keys; several terms per glossary entry.
 - [ ] The parsing settings of `conf.py` (`default_role`, `rst_prolog` /

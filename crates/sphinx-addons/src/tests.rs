@@ -18,14 +18,26 @@ async fn build_in(
     options: Value,
     source_dir: Option<&str>,
 ) -> Vec<(Document, Vec<Diagnostic>)> {
+    build_site(files, &[], options, source_dir).await
+}
+
+/// Like `build_in`, with `assets` among the site's files too: files no
+/// parser takes, whatever their extension. `.myst` files are parsed as
+/// MyST, standing for a parser with an extension of its own.
+async fn build_site(
+    files: &[(&str, &str)],
+    assets: &[&str],
+    options: Value,
+    source_dir: Option<&str>,
+) -> Vec<(Document, Vec<Diagnostic>)> {
     let syntax = syntax(&Options::read(&options).unwrap());
     let mut documents = Vec::new();
-    let mut names: Vec<String> = Vec::new();
+    let mut names: Vec<String> = assets.iter().map(|a| (*a).to_owned()).collect();
     for (source, text) in files {
         names.push((*source).to_owned());
         let (doc, diagnostics) = if source.ends_with(".rst") {
             lsdocs_parser_rst::parse(source, text, None, &syntax)
-        } else if source.ends_with(".md") {
+        } else if source.ends_with(".md") || source.ends_with(".myst") {
             lsdocs_parser_markdown::myst::parse_with_syntax(source, text, &syntax)
         } else {
             continue;
@@ -420,6 +432,46 @@ async fn toctrees_list_documents_and_sections() {
         messages(&out[0].1),
         ["toctree contains reference to nonexisting document \"nope\""]
     );
+}
+
+/// Documents are the files parsers took, whatever their extension: not
+/// the files with a document's extension.
+#[tokio::test]
+async fn documents_are_the_parsed_files() {
+    let out = build_site(
+        &[
+            (
+                "index.rst",
+                "Home\n====\n\nSee :doc:`notes` and :doc:`old`.\n\n\
+                 .. toctree::\n   :glob:\n\n   notes\n   old\n   ref/*\n",
+            ),
+            ("notes.myst", "# Notes\n"),
+            ("ref/a.myst", "# A\n"),
+        ],
+        &["old.md", "ref/b.rst"],
+        Value::Null,
+        None,
+    )
+    .await;
+    let (index, d) = &out[0];
+    assert_eq!(
+        messages(d),
+        [
+            "unknown document: \"old\"",
+            "toctree contains reference to nonexisting document \"old\"",
+        ]
+    );
+    let t = tree(index);
+    let para = &t[0]["children"][1]["children"];
+    assert_eq!(para[1]["url"], "notes.myst");
+    let items = &t[0]["children"][2]["children"][0]["children"];
+    let urls: Vec<&str> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["children"][0]["children"][0]["url"].as_str().unwrap())
+        .collect();
+    assert_eq!(urls, ["notes.myst", "ref/a.myst"]);
 }
 
 #[test]

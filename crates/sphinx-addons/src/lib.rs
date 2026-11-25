@@ -444,11 +444,12 @@ impl Transformer for SphinxAddons {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
+        let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         // The pages toctrees name are this page's children in the
         // navigation (`transform-nav`), unless the page says otherwise.
-        if options.toctree_nav && !notes.toctree.is_empty() {
-            let children: Vec<Value> = notes
-                .toctree
+        let named = site.toctree_documents(&document.source);
+        if options.toctree_nav && !named.is_empty() {
+            let children: Vec<Value> = named
                 .iter()
                 .map(|source| Value::String(format!("/{source}")))
                 .collect();
@@ -457,7 +458,6 @@ impl Transformer for SphinxAddons {
                 .entry("nav_children".to_owned())
                 .or_insert(Value::Array(children));
         }
-        let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         site.resolve(&mut document, &mut diagnostics);
         Ok(RenderTransformEachResult {
             document,
