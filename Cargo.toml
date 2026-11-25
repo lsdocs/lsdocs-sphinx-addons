@@ -14,7 +14,7 @@ repository = "https://github.com/lsdocs/lsdocs-sphinx-addons"
 
 [workspace.dependencies]
 lsdocs-plugin-sdk = { git = "https://github.com/lsdocs/lsdocs-plugin-sdk", branch = "main", version = "0.1.0" }
-lsdocs-parser-markdown = { git = "https://github.com/lsdocs/lsdocs-markdown", branch = "main", version = "0.1.0" }
+lsdocs-parser-markdown = { git = "https://github.com/lsdocs/lsdocs-markdown", branch = "main", version = "0.1.0", default-features = false, features = ["myst"] }
 lsdocs-parser-rst = { git = "https://github.com/lsdocs/lsdocs-rst", branch = "main", version = "0.1.0" }
 lsdocs-rst = { git = "https://github.com/lsdocs/lsdocs-rst", branch = "main", version = "0.1.0" }
 
