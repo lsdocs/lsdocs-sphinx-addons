@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use lsdocs_plugin_sdk::doctree::{
-    Admonition, Anchor, Caption, CodeBlock, Custom, DefinitionList, Document, Figure, List, Math,
-    Node, Paragraph, Span, Strong, plain_text, text,
+    Admonition, Anchor, Caption, CodeBlock, Custom, Document, Figure, List, Math, Node, Paragraph,
+    Span, Strong, text,
 };
 use lsdocs_plugin_sdk::protocol::{Diagnostic, SiteInfo};
 use serde_json::{Value, json};
@@ -52,8 +52,8 @@ struct Parts {
     argument: String,
     options: serde_json::Map<String, Value>,
     content: Option<String>,
-    /// Options parsed as inline markup (`std_domain::parse_options`).
-    parsed_options: serde_json::Map<String, Value>,
+    /// Pieces the host parsed (`std_domain::parse_pieces`).
+    parsed: serde_json::Map<String, Value>,
     /// The parsed argument, for directives declared with an inline one.
     argument_nodes: Vec<Node>,
     /// The parsed content.
@@ -82,9 +82,9 @@ impl Parts {
                 .cloned()
                 .unwrap_or_default(),
             content: string(custom.attrs.get("content")),
-            parsed_options: custom
+            parsed: custom
                 .attrs
-                .get(std_domain::PARSED_OPTIONS)
+                .get(std_domain::PARSED)
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default(),
@@ -346,7 +346,7 @@ impl<'a> Expand<'a> {
                 d.span,
             )],
             "hlist" => self.hlist(&d, children),
-            "glossary" => self.glossary(&d, children),
+            "glossary" => self.glossary(&d),
             "program" => self.program(&d),
             "option" | "cmdoption" | "envvar" | "confval" | "describe" | "object" => {
                 self.object(&d, children)
@@ -693,62 +693,6 @@ impl<'a> Expand<'a> {
         };
         node.attrs.insert("columns".into(), json!(columns));
         vec![Node::Custom(node)]
-    }
-
-    fn glossary(&mut self, d: &Parts, children: Vec<Node>) -> Vec<Node> {
-        let mut found = false;
-        let mut out = Vec::new();
-        for child in children {
-            let Node::DefinitionList(list) = child else {
-                out.push(child);
-                continue;
-            };
-            found = true;
-            // Entries: terms, then their descriptions.
-            let mut entries: Vec<(String, Vec<Node>)> = Vec::new();
-            for item in list.children {
-                match item {
-                    Node::DefinitionTerm(mut term) => {
-                        let name = plain_text(&term.children);
-                        let id = format!("term-{}", lsdocs_rst::make_id(&name));
-                        self.notes
-                            .terms
-                            .entry(name.to_lowercase())
-                            .or_insert_with(|| id.clone());
-                        term.children.insert(0, anchor(&id));
-                        let starts_entry = entries.last().is_none_or(|(_, nodes)| {
-                            nodes
-                                .last()
-                                .is_some_and(|n| matches!(n, Node::DefinitionDescription(_)))
-                        });
-                        if starts_entry {
-                            entries.push((name.to_lowercase(), Vec::new()));
-                        }
-                        if let Some((_, nodes)) = entries.last_mut() {
-                            nodes.push(Node::DefinitionTerm(term));
-                        }
-                    }
-                    other => match entries.last_mut() {
-                        Some((_, nodes)) => nodes.push(other),
-                        None => entries.push((String::new(), vec![other])),
-                    },
-                }
-            }
-            if d.flag("sorted") {
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-            }
-            out.push(Node::DefinitionList(DefinitionList {
-                span: list.span,
-                children: entries.into_iter().flat_map(|(_, nodes)| nodes).collect(),
-            }));
-        }
-        if !found {
-            self.warn(
-                d.span,
-                "glossary: its content must be a definition list of terms",
-            );
-        }
-        vec![custom("glossary", out, d.span)]
     }
 
     /// A toctree: a placeholder holding its entries as written, resolved

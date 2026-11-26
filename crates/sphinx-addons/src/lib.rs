@@ -27,7 +27,7 @@
 //! | `only` | Its content if its tag expression is true (`html and not draft`); tags are `html`, `format_html`, `builder_html` and those of the `tags` option. |
 //! | `centered` | A `custom:centered` node with a bold paragraph. |
 //! | `hlist` | A `custom:hlist` node whose children are the columns: the bullet list in its content, split. |
-//! | `glossary` | A `custom:glossary` node around the definition list in its content; each term gets an id (`term-<term>`) for `term` references. `:sorted:` sorts it. |
+//! | `glossary` | A `custom:glossary` node around a definition list of its entries, its content read as Sphinx reads it: lines not indented are terms (several in a row share a definition; `term : classifier` hides the classifier), the indented lines below them the definition. Terms are inline markup and definitions blocks, parsed by the document's parser (`host/parse`); each term gets an id (`term-<term>`) for `term` references and a main index entry. `:sorted:` sorts the entries by their first term. |
 //! | `toctree` | A `custom:toctree` node with a nested list of links to the documents it names (their titles, and their sections to `:maxdepth:`), unless `:hidden:`. `:glob:`, `:caption:`, `:titlesonly:` and `:reversed:` work as in Sphinx. The pages a page's toctrees name (hidden ones too) become its `nav_children`, which `transform-nav` follows; `:numbered:` numbers their sections (`1.2. Title`), with the pages each one's toctrees name after its sections. |
 //! | `index` | An anchor, and index entries (`single`, `pair`, `triple`, `see`, `seealso`; `!` for main entries) for the generated index page, `genindex.md`. |
 //! | `rubric` | A `custom:rubric` paragraph, or heading with `:heading-level:` (as `html_tag`). |
@@ -58,7 +58,7 @@
 //! | `any` | A label, else a term, else a document. |
 //! | `download` | A link to a file in the source directory. |
 //! | `abbr` | `` :abbr:`LIFO (last-in, first-out)` ``: a `custom:abbr` inline with a `title`. |
-//! | `kbd`, `guilabel`, `menuselection` | `custom` inlines of their name; `&` marks an accelerator key, `-->` separates menu items. |
+//! | `kbd`, `guilabel`, `menuselection` | `custom` inlines of their name; `kbd` makes one per key (`Ctrl+C` is `Ctrl`, `+`, `C`; split on `-`, `+`, `^` or spaces, two-word keys like `Page Up` kept), `&` marks an accelerator key, `-->` separates menu items. |
 //! | `file`, `samp` | Inline code, or a `custom` inline with the `{variable}` parts emphasized. |
 //! | `command`, `program` | Strong text. |
 //! | `dfn`, `mailheader`, `mimetype`, `newsgroup`, `manpage` | Emphasized text; `manpage` links to `manpages_url` if set. |
@@ -327,7 +327,9 @@ pub(crate) fn syntax(options: &Options) -> Syntax {
     });
     directives.push(DirectiveSyntax {
         options: option_kinds([("sorted", Flag)]),
-        content: blocks,
+        // Read as Sphinx reads it (terms, then indented definitions), not
+        // as a definition list.
+        content: ContentSyntax::Text,
         ..directive("glossary")
     });
     directives.push(DirectiveSyntax {
@@ -493,7 +495,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<ParseTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
-        directives::std_domain::parse_options(&mut document, ctx).await;
+        directives::std_domain::parse_pieces(&mut document, ctx).await;
         let (notes, _) = expand(&mut document, &options, ctx);
         Ok(ParseTransformEachResult {
             data: roles::collect(&document, &notes, &options),
@@ -521,7 +523,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<RenderTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
-        directives::std_domain::parse_options(&mut document, ctx).await;
+        directives::std_domain::parse_pieces(&mut document, ctx).await;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
         let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         // The pages toctrees name are this page's children in the
