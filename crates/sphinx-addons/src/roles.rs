@@ -626,7 +626,16 @@ impl<'a> Site<'a> {
                     .collect();
                 vec![inline(name, Some("code"), children, span)]
             }
-            "kbd" => vec![inline("kbd", Some("kbd"), plain(raw), span)],
+            "kbd" => key_parts(raw)
+                .into_iter()
+                .map(|(key, part)| {
+                    if key {
+                        inline("kbd", Some("kbd"), plain(&part), span)
+                    } else {
+                        Node::Text(Text { span, value: part })
+                    }
+                })
+                .collect(),
             "guilabel" => vec![inline("guilabel", None, accelerated(raw, span), span)],
             "menuselection" => {
                 let items = raw.replace("-->", "\u{2023}");
@@ -1450,6 +1459,72 @@ fn accelerated(value: &str, span: Option<Span>) -> Vec<Node> {
 
 /// The parts of `file` and `samp` text: literal text, and `{variable}`
 /// parts (`\{` is a literal brace).
+/// The keys of a `kbd` role and the separators between them, as Sphinx
+/// splits them: on `-`, `+`, `^` or a run of spaces with a character on
+/// each side (`Ctrl+-` is `Ctrl` and `-`), keeping the two-word keys
+/// (`Page Up`) whole. `(true, key)` or `(false, separator)`.
+fn key_parts(text: &str) -> Vec<(bool, String)> {
+    // The parts between separators, and the separators (odd indexes).
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts = vec![String::new()];
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let len = match c {
+            '-' | '+' | '^' => 1,
+            ' ' => chars[i..].iter().take_while(|c| **c == ' ').count(),
+            _ => 0,
+        };
+        if i > 0 && len > 0 && i + len < chars.len() {
+            parts.push(chars[i..i + len].iter().collect());
+            parts.push(String::new());
+            i += len;
+        } else {
+            if let Some(last) = parts.last_mut() {
+                last.push(c);
+            }
+            i += 1;
+        }
+    }
+    let two_words = |parts: &[String]| {
+        const KEYS: &[(&str, &str)] = &[
+            ("back", "space"),
+            ("caps", "lock"),
+            ("num", "lock"),
+            ("page", "down"),
+            ("page", "up"),
+            ("scroll", "lock"),
+            ("sys", "rq"),
+        ];
+        parts.len() > 2
+            && parts[1].chars().all(char::is_whitespace)
+            && KEYS.contains(&(
+                parts[0].to_lowercase().as_str(),
+                parts[2].to_lowercase().as_str(),
+            ))
+    };
+    if parts.len() == 1 || two_words(&parts) {
+        return vec![(true, text.to_owned())];
+    }
+    let mut out = Vec::new();
+    let mut rest = parts.as_slice();
+    while !rest.is_empty() {
+        if two_words(rest) {
+            out.push((true, rest[..3].concat()));
+            rest = &rest[3..];
+        } else {
+            out.push((true, rest[0].clone()));
+            rest = &rest[1..];
+        }
+        let Some((separator, after)) = rest.split_first() else {
+            break;
+        };
+        out.push((false, separator.clone()));
+        rest = after;
+    }
+    out
+}
+
 pub(crate) fn variable_parts(value: &str) -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
     let mut buf = String::new();

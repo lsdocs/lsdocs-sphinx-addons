@@ -281,9 +281,9 @@ async fn glossary_terms_and_references() {
     let list = &t[0]["children"][0]["children"];
     assert_eq!(
         list[0]["children"][0],
-        json!({"type": "anchor", "id": "term-apple"})
+        json!({"type": "anchor", "id": "term-Apple"})
     );
-    assert_eq!(list[2]["children"][0]["id"], "term-zebra");
+    assert_eq!(list[2]["children"][0]["id"], "term-Zebra");
     // numfig numbers the caption.
     let caption = &t[1]["children"][1]["children"];
     assert_eq!(caption[0]["value"], "Fig. 1 ");
@@ -302,15 +302,15 @@ async fn glossary_terms_and_references() {
     assert_eq!(
         links,
         [
-            json!(["terms.rst#term-apple", {"document": "terms.rst", "anchor": "term-apple"}, "apple"]),
-            json!(["terms.rst#term-zebra", {"document": "terms.rst", "anchor": "term-zebra"}, "the animal"]),
+            json!(["terms.rst#term-Apple", {"document": "terms.rst", "anchor": "term-Apple"}, "apple"]),
+            json!(["terms.rst#term-Zebra", {"document": "terms.rst", "anchor": "term-Zebra"}, "the animal"]),
             json!(["terms.rst#fig-one", {"document": "terms.rst", "anchor": "fig-one"}, "Fig. 1"]),
             json!(["terms.rst#fig-one", {"document": "terms.rst", "anchor": "fig-one"}, "Figure 1: The caption."]),
             json!(["terms.rst#equation-euler", {"document": "terms.rst", "anchor": "equation-euler"}, "(1)"]),
             json!(["#fig-one", {"label": "fig-one"}, "The caption."]),
             json!(["#fig-one", {"label": "fig-one"}, "text"]),
             json!(["terms.rst", {"document": "terms.rst"}, ""]),
-            json!(["terms.rst#term-apple", {"document": "terms.rst", "anchor": "term-apple"}, "apple"]),
+            json!(["terms.rst#term-Apple", {"document": "terms.rst", "anchor": "term-Apple"}, "apple"]),
         ]
     );
     // Problems are warnings, and the text stays.
@@ -330,13 +330,59 @@ async fn glossary_terms_and_references() {
     assert_eq!(plain_text(&out[0].0.children), "nope nope x");
 }
 
+/// `kbd`: a key per part, as Sphinx splits them: on `-`, `+`, `^` or
+/// spaces between two characters, two-word keys (`Page Up`) kept whole.
+#[tokio::test]
+async fn compound_keys() {
+    let t = same(
+        ":kbd:`Ctrl+Alt+Del` :kbd:`Ctrl+-` :kbd:`Shift Page Up` :kbd:`Caps Lock` :kbd:`-`\n",
+        "{kbd}`Ctrl+Alt+Del` {kbd}`Ctrl+-` {kbd}`Shift Page Up` {kbd}`Caps Lock` {kbd}`-`\n",
+        Value::Null,
+    )
+    .await;
+    // Each key a `kbd`, separators text: what the keys and text are.
+    let shape = |nodes: &Value| -> Vec<String> {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| match n["kind"].as_str() {
+                Some("kbd") => format!("[{}]", plain(&n["children"])),
+                _ => n["value"].as_str().unwrap().to_owned(),
+            })
+            .collect()
+    };
+    assert_eq!(
+        shape(&t[0]["children"]),
+        [
+            "[Ctrl]",
+            "+",
+            "[Alt]",
+            "+",
+            "[Del]",
+            " ",
+            "[Ctrl]",
+            "+",
+            "[-]",
+            " ",
+            "[Shift]",
+            " ",
+            "[Page Up]",
+            " ",
+            "[Caps Lock]",
+            " ",
+            "[-]",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn inline_roles() {
     let t = same(
-        ":kbd:`Ctrl+C` :abbr:`LIFO (last-in, first-out)` :guilabel:`&Cancel` \
+        ":kbd:`Enter` :abbr:`LIFO (last-in, first-out)` :guilabel:`&Cancel` \
          :menuselection:`File --> &Open` :samp:`print({x})` :file:`a.txt` \
          :command:`ls` :dfn:`term` :regexp:`a+`\n",
-        "{kbd}`Ctrl+C` {abbr}`LIFO (last-in, first-out)` {guilabel}`&Cancel` \
+        "{kbd}`Enter` {abbr}`LIFO (last-in, first-out)` {guilabel}`&Cancel` \
          {menuselection}`File --> &Open` {samp}`print({x})` {file}`a.txt` \
          {command}`ls` {dfn}`term` {regexp}`a+`\n",
         Value::Null,
@@ -346,7 +392,7 @@ async fn inline_roles() {
     assert_eq!(
         p[0],
         json!({"type": "custom", "kind": "kbd", "attrs": {"inline": true, "html_tag": "kbd"},
-               "children": [{"type": "text", "value": "Ctrl+C"}]})
+               "children": [{"type": "text", "value": "Enter"}]})
     );
     assert_eq!(p[2]["attrs"]["title"], "last-in, first-out");
     assert_eq!(p[2]["children"][0]["value"], "LIFO");
@@ -963,4 +1009,112 @@ async fn std_ids_are_unique() {
             .collect::<Vec<_>>(),
         ["envvar-0", "envvar-1", "cmdoption-v", "cmdoption-0"]
     );
+}
+
+/// A glossary entry may have several terms (as Sphinx reads glossaries:
+/// lines not indented are terms, the indented ones below them the
+/// definition), in both syntaxes; `term : classifier` hides the
+/// classifier; terms are inline markup, definitions blocks.
+#[tokio::test]
+async fn glossary_entries_with_several_terms() {
+    let t = same(
+        ".. glossary::\n\n   environment\n   ``env``\n      Where *everything* is.\n\n      Kept.\n\n\
+         \x20  source : files\n      Read from it.\n",
+        "```{glossary}\nenvironment\n`env`\n   Where *everything* is.\n\n   Kept.\n\n\
+         source : files\n   Read from it.\n```\n",
+        Value::Null,
+    )
+    .await;
+    let list = &t[0]["children"][0]["children"];
+    let kinds: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "definition_term",
+            "definition_term",
+            "definition_description",
+            "definition_term",
+            "definition_description",
+        ]
+    );
+    assert_eq!(
+        anchor_ids(&t[0]),
+        ["term-environment", "term-env", "term-source"]
+    );
+    // The term as inline markup, the classifier not shown.
+    assert_eq!(
+        list[1]["children"][1],
+        json!({"type": "inline_code", "value": "env"})
+    );
+    assert_eq!(plain(&list[3]), "source");
+    // The definition as blocks, its roles resolved.
+    let definition = &list[2]["children"];
+    assert_eq!(definition.as_array().unwrap().len(), 2);
+    assert_eq!(definition[0]["children"][1]["type"], "emphasis");
+    // Roles in a definition are resolved.
+    let out = build(
+        &[(
+            "a.rst",
+            ".. glossary::\n\n   env\n      Itself: :term:`env`.\n",
+        )],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(urls(&tree(&out[0].0)), ["#term-env"]);
+}
+
+#[tokio::test]
+async fn glossary_format_warnings() {
+    let out = build(
+        &[(
+            "a.rst",
+            ".. glossary::\n\n   one\n\n   two\n      Both.\n   three\n      Too close.\n",
+        )],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        messages(&out[0].1),
+        [
+            "glossary terms must not be separated by empty lines",
+            "glossary term must be preceded by empty line",
+        ]
+    );
+    // The terms of an entry stay one entry.
+    let list = &tree(&out[0].0)[0]["children"][0]["children"];
+    assert_eq!(list.as_array().unwrap().len(), 5);
+}
+
+/// Glossary terms are main index entries; what the host parsed for a
+/// directive has its span (not spans within the piece).
+#[tokio::test]
+async fn glossary_index_and_spans() {
+    let out = build(
+        &[(
+            "a.rst",
+            "Intro.\n\n.. glossary::\n\n   env\n      Where *it* is.\n",
+        )],
+        Value::Null,
+    )
+    .await;
+    let doc = serde_json::to_value(&out[0].0.children).unwrap();
+    let glossary = &doc[1];
+    assert_eq!(glossary["kind"], "glossary");
+    let span = glossary["span"].clone();
+    assert!(span.is_object(), "{glossary}");
+    let definition = &glossary["children"][0]["children"][1]["children"][0];
+    assert_eq!(definition["type"], "paragraph");
+    assert_eq!(definition["span"], span);
+    assert_eq!(definition["children"][1]["span"], span);
+    // The index: the term, as a main entry (in `strong`).
+    let index = tree(&out[1].0);
+    let entry = &index[0]["children"][1]["children"][1]["children"][0]["children"][0];
+    assert_eq!(plain(entry), "env");
+    assert_eq!(entry["children"][0]["type"], "link");
+    assert_eq!(entry["children"][0]["children"][0]["type"], "strong");
 }

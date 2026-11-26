@@ -22,9 +22,7 @@ Its settings and behavior are described in the lsdocs documentation
   files parsers took, whatever their extension. A document the plugin's
   `files` patterns leave out is not one of them, so it cannot be named.
 - Not supported: `literalinclude`'s `:pyobject:` and `:diff:`, encodings
-  other than UTF-8; compound keys in `kbd` (`Ctrl+C` is one key); several
-  terms for one glossary entry (in reStructuredText the content is a
-  definition list); `conf.py` settings that change parsing
+  other than UTF-8; `conf.py` settings that change parsing
   (`default_role`, `rst_prolog` / `rst_epilog`, the `|version|` and
   `|release|` substitutions).
 - Standard domain: references to an object described twice go to the
@@ -34,13 +32,16 @@ Its settings and behavior are described in the lsdocs documentation
   and `code`, through `html_tag`) where the renderer takes a block
   `html_tag` of `pre` (render-html does); elsewhere it is a container
   whose spaces may not be kept.
-- `confval`'s `:type:` and `:default:` are parsed by the site's parser
-  for the document's extension (`host/parse`); a document no parser
-  answers for keeps them as text.
+- `confval`'s `:type:` and `:default:`, and a glossary's terms and
+  definitions, are parsed by the site's parser for the document's
+  extension (`host/parse`); a document no parser answers for keeps them
+  as text. What it parses has the directive's span, not its own.
+- A glossary term's classifier (`term : key`) is not used as its index
+  key (Sphinx groups the entry under it): the index has no keys.
 
 ## TODO
 
 - [ ] `literalinclude`'s `:pyobject:` and `:diff:`; other encodings.
-- [ ] Compound `kbd` keys; several terms per glossary entry.
+- [ ] Index keys (a glossary term's classifier) in the generated index.
 - [ ] The parsing settings of `conf.py` (`default_role`, `rst_prolog` /
       `rst_epilog`, `|version|` / `|release|`).

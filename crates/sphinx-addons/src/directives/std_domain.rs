@@ -14,71 +14,225 @@ use std::collections::BTreeMap;
 
 use super::{Expand, Parts, anchor, paragraph};
 
-/// The attribute holding a directive's options parsed as inline markup.
-pub(crate) const PARSED_OPTIONS: &str = "parsed_options";
+/// The attribute holding the pieces of a directive the host parsed
+/// (`parse_pieces`), by `piece_key`.
+pub(crate) const PARSED: &str = "parsed";
 
-/// The options of a directive that are inline markup.
-fn inline_options(kind: &str) -> &'static [&'static str] {
-    match directive_name(kind) {
-        "confval" => &["type", "default"],
-        _ => &[],
+/// What a piece of a directive is written in.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Markup {
+    /// Inline markup: a term, an option's value.
+    Inline,
+    /// Block markup: a definition.
+    Blocks,
+}
+
+/// The key of a parsed piece in the `PARSED` attribute.
+fn piece_key(markup: Markup, text: &str) -> String {
+    match markup {
+        Markup::Inline => format!("inline:{text}"),
+        Markup::Blocks => format!("blocks:{text}"),
     }
 }
 
-/// Parses the options of the domain's directives that are inline markup
-/// (`confval`'s `:type:` and `:default:`) with the document's parser
-/// (`host/parse`), as Sphinx does, keeping them in the directive's
-/// `PARSED_OPTIONS` attribute for `Expand`. An option no parser takes, or
-/// that is not one paragraph, stays text.
-pub(crate) async fn parse_options(document: &mut Document, ctx: &Context) {
+/// The pieces of the directive `c` that are markup Sphinx parses itself:
+/// `confval`'s `:type:` and `:default:`, and a `glossary`'s terms and
+/// definitions.
+fn pieces(c: &Custom) -> Vec<(Markup, String)> {
+    match directive_name(&c.kind) {
+        "confval" => ["type", "default"]
+            .iter()
+            .filter_map(|option| {
+                c.attrs
+                    .get("options")
+                    .and_then(|o| o.get(*option))
+                    .and_then(Value::as_str)
+                    .map(|text| (Markup::Inline, text.trim().to_owned()))
+            })
+            .collect(),
+        "glossary" => {
+            let content = c
+                .attrs
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            for entry in glossary_entries(content).0 {
+                for line in &entry.terms {
+                    out.push((Markup::Inline, split_term_classifiers(line).0.to_owned()));
+                }
+                let definition = entry.definition();
+                if !definition.trim().is_empty() {
+                    out.push((Markup::Blocks, definition));
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Parses the pieces of directives that are markup Sphinx parses itself
+/// (`pieces`) with the document's parser (`host/parse`), keeping them in
+/// the directive's `PARSED` attribute for `Expand`. Their spans are the
+/// directive's: those the parser gives are within the piece. A piece no
+/// parser takes (or inline markup that is not one paragraph) is left out,
+/// and `Expand` keeps its text.
+pub(crate) async fn parse_pieces(document: &mut Document, ctx: &Context) {
     let Some((_, extension)) = document.source.rsplit_once('.') else {
         return;
     };
-    let mut texts = Vec::new();
-    visit(&document.children, &mut |c| {
-        for option in inline_options(&c.kind) {
-            if let Some(text) = c
-                .attrs
-                .get("options")
-                .and_then(|o| o.get(*option))
-                .and_then(Value::as_str)
-            {
-                texts.push(text.trim().to_owned());
-            }
-        }
-    });
-    if texts.is_empty() {
+    let mut wanted = Vec::new();
+    visit(&document.children, &mut |c| wanted.push(pieces(c)));
+    if wanted.iter().all(Vec::is_empty) {
         return;
     }
-    let mut parsed = Vec::with_capacity(texts.len());
-    for text in texts {
-        let nodes = match ctx.parse(extension, &document.source, &text).await {
-            Ok(result) => match <[Node; 1]>::try_from(result.document.children) {
-                Ok([Node::Paragraph(p)]) => Some(p.children),
-                _ => None,
+    let mut parsed: BTreeMap<String, Option<Vec<Node>>> = BTreeMap::new();
+    for (markup, text) in wanted.iter().flatten() {
+        let key = piece_key(*markup, text);
+        if parsed.contains_key(&key) {
+            continue;
+        }
+        let nodes = match ctx.parse(extension, &document.source, text).await {
+            Ok(result) => match markup {
+                Markup::Blocks => Some(result.document.children),
+                Markup::Inline => match <[Node; 1]>::try_from(result.document.children) {
+                    Ok([Node::Paragraph(p)]) => Some(p.children),
+                    _ => None,
+                },
             },
             Err(_) => None,
         };
-        parsed.push(nodes);
+        parsed.insert(key, nodes);
     }
-    let mut parsed = parsed.into_iter();
+    let mut wanted = wanted.into_iter();
     visit_mut(&mut document.children, &mut |c| {
         let mut map = serde_json::Map::new();
-        for option in inline_options(&c.kind) {
-            let given = c
-                .attrs
-                .get("options")
-                .and_then(|o| o.get(*option))
-                .is_some_and(Value::is_string);
-            if given && let Some(Some(nodes)) = parsed.next() {
-                map.insert((*option).to_owned(), json!(nodes));
+        for (markup, text) in wanted.next().unwrap_or_default() {
+            let key = piece_key(markup, &text);
+            if let Some(Some(nodes)) = parsed.get(&key) {
+                let mut nodes = nodes.clone();
+                respan(&mut nodes, c.span);
+                map.insert(key, json!(nodes));
             }
         }
         if !map.is_empty() {
-            c.attrs
-                .insert(PARSED_OPTIONS.to_owned(), Value::Object(map));
+            c.attrs.insert(PARSED.to_owned(), Value::Object(map));
         }
     });
+}
+
+/// `nodes` and everything below them with the span `span`.
+fn respan(nodes: &mut [Node], span: Option<Span>) {
+    for node in nodes {
+        *node.span_mut() = span;
+        if let Some(children) = node.children_mut() {
+            respan(children, span);
+        }
+    }
+}
+
+impl Parts {
+    /// The piece `text` of the directive as the host parsed it, if it did.
+    pub(super) fn parsed(&self, markup: Markup, text: &str) -> Option<Vec<Node>> {
+        let nodes = self.parsed.get(&piece_key(markup, text))?;
+        serde_json::from_value(nodes.clone()).ok()
+    }
+}
+
+/// A glossary entry as written: its term lines, and its definition's
+/// lines, without their indentation.
+#[derive(Debug, Default)]
+struct Entry {
+    terms: Vec<String>,
+    lines: Vec<String>,
+}
+
+impl Entry {
+    fn definition(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
+/// A glossary's content read as Sphinx reads it: lines not indented are
+/// terms (several in a row share a definition), the indented lines below
+/// them the definition (indented as its first line), `.. ` lines
+/// comments. With the warnings Sphinx gives for its layout.
+fn glossary_entries(content: &str) -> (Vec<Entry>, Vec<&'static str>) {
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut warnings = Vec::new();
+    let (mut in_definition, mut in_comment, mut was_empty) = (true, false, true);
+    let mut indent = 0;
+    for line in content.lines() {
+        if line.is_empty() {
+            if in_definition && let Some(entry) = entries.last_mut() {
+                entry.lines.push(String::new());
+            }
+            was_empty = true;
+            continue;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            if line.starts_with(".. ") {
+                in_comment = true;
+                continue;
+            }
+            in_comment = false;
+            if in_definition {
+                if !was_empty {
+                    warnings.push("glossary term must be preceded by empty line");
+                }
+                entries.push(Entry {
+                    terms: vec![line.to_owned()],
+                    lines: Vec::new(),
+                });
+                in_definition = false;
+            } else {
+                if was_empty {
+                    warnings.push("glossary terms must not be separated by empty lines");
+                }
+                match entries.last_mut() {
+                    Some(entry) => entry.terms.push(line.to_owned()),
+                    None => warnings.push("glossary seems to be misformatted, check indentation"),
+                }
+            }
+        } else if !in_comment {
+            if !in_definition {
+                in_definition = true;
+                indent = line.chars().take_while(|c| c.is_whitespace()).count();
+            }
+            match entries.last_mut() {
+                Some(entry) => entry.lines.push(line.chars().skip(indent).collect()),
+                None => warnings.push("glossary seems to be misformatted, check indentation"),
+            }
+        }
+        was_empty = false;
+    }
+    (entries, warnings)
+}
+
+/// A glossary term line without its classifiers (`term : classifier`,
+/// the first of which Sphinx takes as the index key).
+fn split_term_classifiers(line: &str) -> (&str, Option<&str>) {
+    // ` +: +` separates them.
+    let separator = |s: &str| -> Option<(usize, usize)> {
+        let bytes = s.as_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b':' && i > 0 && bytes[i - 1] == b' ' && bytes.get(i + 1) == Some(&b' ') {
+                let start = s[..i].trim_end_matches(' ').len();
+                let end = i + 1 + (s[i + 1..].len() - s[i + 1..].trim_start_matches(' ').len());
+                return Some((start, end));
+            }
+        }
+        None
+    };
+    match separator(line) {
+        Some((start, end)) => {
+            let rest = &line[end..];
+            let classifier = separator(rest).map_or(rest, |(s, _)| &rest[..s]);
+            (&line[..start], Some(classifier))
+        }
+        None => (line, None),
+    }
 }
 
 /// Calls `f` with every `custom` node of `nodes` and below, in document
@@ -393,6 +547,76 @@ impl Expand<'_> {
         out
     }
 
+    /// `glossary`: its entries (`glossary_entries`) as a definition list,
+    /// several terms to an entry where it has them; each term (inline
+    /// markup) with an id (`term-<term>`) for `term` references and a main
+    /// index entry, each definition blocks. `:sorted:` sorts the entries
+    /// by their first term.
+    pub(super) fn glossary(&mut self, d: &Parts) -> Vec<Node> {
+        let content = d.content.clone().unwrap_or_default();
+        let (entries, warnings) = glossary_entries(&content);
+        for warning in warnings {
+            self.warn(d.span, warning);
+        }
+        let mut items: Vec<(String, Vec<Node>)> = Vec::new();
+        for entry in entries {
+            let mut nodes = Vec::new();
+            let mut first = None;
+            for line in &entry.terms {
+                let (term, _) = split_term_classifiers(line);
+                let inline = match d.parsed(Markup::Inline, term) {
+                    Some(parsed) => self.nodes(parsed),
+                    None => vec![plain(term)],
+                };
+                let text = lsdocs_plugin_sdk::doctree::plain_text(&inline);
+                let id = self.make_id("term", &text);
+                self.notes
+                    .terms
+                    .entry(text.to_lowercase())
+                    .or_insert_with(|| id.clone());
+                self.add_index_entries(
+                    vec![("single".to_owned(), text.clone(), true)],
+                    &id,
+                    d.span,
+                );
+                first.get_or_insert_with(|| text.to_lowercase());
+                let mut children = vec![anchor(&id)];
+                children.extend(inline);
+                nodes.push(Node::DefinitionTerm(DefinitionTerm {
+                    span: d.span,
+                    children,
+                }));
+            }
+            let definition = entry.definition();
+            let body = if definition.trim().is_empty() {
+                Vec::new()
+            } else {
+                match d.parsed(Markup::Blocks, &definition) {
+                    Some(parsed) => self.nodes(parsed),
+                    None => vec![paragraph(vec![plain(definition.trim())], d.span)],
+                }
+            };
+            nodes.push(Node::DefinitionDescription(DefinitionDescription {
+                span: d.span,
+                children: body,
+            }));
+            items.push((first.unwrap_or_default(), nodes));
+        }
+        if d.flag("sorted") {
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        let list = Node::DefinitionList(DefinitionList {
+            span: d.span,
+            children: items.into_iter().flat_map(|(_, nodes)| nodes).collect(),
+        });
+        vec![Node::Custom(Custom {
+            span: d.span,
+            kind: "glossary".into(),
+            attrs: BTreeMap::new(),
+            children: vec![list],
+        })]
+    }
+
     /// `program`: the program the options that follow belong to (`None`
     /// for none).
     pub(super) fn program(&mut self, d: &Parts) -> Vec<Node> {
@@ -464,12 +688,8 @@ impl Expand<'_> {
         if kind == "confval" {
             for (option, label) in [("type", "Type"), ("default", "Default")] {
                 if let Some(value) = d.option(option) {
-                    let body = match d.parsed_options.get(option) {
-                        Some(nodes) => {
-                            let nodes: Vec<Node> =
-                                serde_json::from_value(nodes.clone()).unwrap_or_default();
-                            self.nodes(nodes)
-                        }
+                    let body = match d.parsed(Markup::Inline, value.trim()) {
+                        Some(nodes) => self.nodes(nodes),
                         None => vec![plain(value.trim())],
                     };
                     let mut line = vec![
