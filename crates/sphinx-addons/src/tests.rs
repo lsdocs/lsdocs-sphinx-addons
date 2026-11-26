@@ -763,22 +763,32 @@ async fn std_objects() {
     assert_eq!(plain(&confval[2]), "The editor.");
     // describe: no target, no domain.
     assert_eq!(t[3]["attrs"], json!({"objtype": "describe"}));
-    // productionlist: names aligned; a token no production names is code
-    // (linked ones: `std_references`).
-    let production = &t[4]["children"][0]["children"];
-    assert_eq!(t[4]["attrs"]["group"], "git");
-    assert_eq!(production[2]["value"], " ::= ");
+    // productionlist: drawn like a code block, `pre` around one `code`
+    // holding the productions, a newline apart, the names aligned; a token
+    // no production names is its text (linked ones: `std_references`).
+    let list = &t[4];
+    assert_eq!(list["attrs"], json!({"group": "git", "html_tag": "pre"}));
+    let code = &list["children"][0];
+    assert_eq!(code["kind"], "productions");
+    assert_eq!(code["attrs"], json!({"html_tag": "code", "inline": true}));
+    let production = &code["children"];
     assert_eq!(
-        production[3],
-        json!({"type": "inline_code", "value": "name"})
+        production[1],
+        json!({"type": "strong", "children": [{"type": "text", "value": "rev"}]})
     );
+    assert_eq!(production[2]["value"], " ::= ");
+    assert_eq!(production[3], json!({"type": "text", "value": "name"}));
     let continued = production
         .as_array()
         .unwrap()
         .iter()
-        .position(|n| n["type"] == "line_break")
+        .position(|n| n["value"] == "\n")
         .unwrap();
     assert_eq!(production[continued + 1]["value"], "        ");
+    assert_eq!(
+        plain(code),
+        "rev ::= name | name \"~\" DIGIT+\n        | x\nn   ::= DIGIT+"
+    );
 }
 
 #[tokio::test]

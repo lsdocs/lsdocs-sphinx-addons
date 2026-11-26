@@ -30,8 +30,10 @@ Its settings and behavior are described in the lsdocs documentation
 - Standard domain: references to an object described twice go to the
   first description (Sphinx takes the last, and warns); ids drop
   characters outside ASCII (Sphinx first decomposes them, so `e` with an
-  accent is `e`). A `productionlist`'s names line up only where the
-  renderer keeps its spaces (Sphinx draws it preformatted).
+  accent is `e`). A `productionlist` is drawn like a code block (`pre`
+  and `code`, through `html_tag`) where the renderer takes a block
+  `html_tag` of `pre` (render-html does); elsewhere it is a container
+  whose spaces may not be kept.
 - `confval`'s `:type:` and `:default:` are parsed by the site's parser
   for the document's extension (`host/parse`); a document no parser
   answers for keeps them as text.

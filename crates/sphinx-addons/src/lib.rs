@@ -39,7 +39,7 @@
 //! | `option`, `cmdoption` | A `custom:desc` node (`domain: std`, `objtype`) around a definition list: each signature (one per line, `-o FILE, --output=FILE`) a term, with an id per option (`cmdoption-<program>-<option>`) for `option` references and index entries, and the content its description. |
 //! | `envvar`, `confval` | Likewise, with the ids `envvar-<name>` and `confval-<name>`; `confval`'s `:type:` and `:default:` come first in its description. |
 //! | `describe`, `object` | Likewise, with no id or index entry. |
-//! | `productionlist` | A `custom:productionlist` node with a paragraph of grammar productions (`name: tokens`), one per line, each name with an id (`grammar-token-<group>-<name>`) for `token` references, and each `` `token` `` in them a reference. A first line without `:` names their group. |
+//! | `productionlist` | A `custom:productionlist` node (`html_tag: pre`) around a `custom:productions` inline (`html_tag: code`), drawn like a code block: grammar productions (`name: tokens`), one per line, the names aligned, each name with an id (`grammar-token-<group>-<name>`) for `token` references, and each `` `token` `` in them a reference. A first line without `:` names their group. |
 //!
 //! `option`, `envvar` and `confval` take `:no-index:` (no ids),
 //! `:no-index-entry:`, `:no-contents-entry:` and `:no-typesetting:` (the

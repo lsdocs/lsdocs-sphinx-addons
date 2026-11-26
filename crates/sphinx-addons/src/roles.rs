@@ -776,7 +776,16 @@ impl<'a> Site<'a> {
                     .and_then(|(doc, id)| Some((doc, id.as_str()?.to_owned())))
             }
         };
-        let code = vec![Node::InlineCode(InlineCode { span, value: shown })];
+        let uncoded = c
+            .attrs
+            .get(crate::directives::std_domain::UNCODED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let code = if uncoded {
+            vec![Node::Text(Text { span, value: shown })]
+        } else {
+            vec![Node::InlineCode(InlineCode { span, value: shown })]
+        };
         match found {
             Some((doc, id)) => vec![self.link_to(source, doc, Some(&id), code, span)],
             None => {

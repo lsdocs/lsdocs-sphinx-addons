@@ -7,7 +7,7 @@
 use lsdocs_plugin_sdk::Context;
 use lsdocs_plugin_sdk::doctree::{
     Custom, DefinitionDescription, DefinitionList, DefinitionTerm, Document, Emphasis, InlineCode,
-    LineBreak, Node, Span, Strong, Text,
+    Node, Span, Strong, Text,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -233,10 +233,15 @@ fn split_option(text: &str) -> Option<(String, String)> {
     Some((option, args))
 }
 
+/// The attribute of a role whose text is shown as is, not as code: the
+/// token references of a `productionlist`, already in its `code`.
+pub(crate) const UNCODED: &str = "uncoded";
+
 /// A role of `productionlist`'s token references: `title <target>`.
 fn token_role(title: &str, target: &str) -> Node {
     let mut attrs = BTreeMap::new();
     attrs.insert("name".to_owned(), json!("token"));
+    attrs.insert(UNCODED.to_owned(), json!(true));
     attrs.insert("text".to_owned(), json!(format!("{title} <{target}>")));
     Node::Custom(Custom {
         span: None,
@@ -618,7 +623,7 @@ impl Expand<'_> {
         let mut line = Vec::new();
         for (i, (production, tokens)) in productions.into_iter().enumerate() {
             if i > 0 {
-                line.push(Node::LineBreak(LineBreak { span: d.span }));
+                line.push(plain("\n"));
             }
             if production.is_empty() {
                 line.push(plain(&" ".repeat(width + 5)));
@@ -631,7 +636,10 @@ impl Expand<'_> {
                 };
                 self.notes.tokens.entry(key).or_insert_with(|| id.clone());
                 line.push(anchor(&id));
-                line.push(name(production));
+                line.push(Node::Strong(Strong {
+                    span: None,
+                    children: vec![plain(production)],
+                }));
                 line.push(plain(&format!(
                     "{:>w$}",
                     " ::= ",
@@ -640,12 +648,23 @@ impl Expand<'_> {
             }
             line.extend(token_nodes(tokens, &group));
         }
+        // Drawn like a code block (`pre` and `code`), spaces and newlines
+        // kept, so that the `::=` line up.
+        let mut code = Custom {
+            span: d.span,
+            kind: "productions".into(),
+            attrs: BTreeMap::new(),
+            children: line,
+        };
+        code.attrs.insert("inline".to_owned(), json!(true));
+        code.attrs.insert("html_tag".to_owned(), json!("code"));
         let mut node = Custom {
             span: d.span,
             kind: "productionlist".into(),
             attrs: BTreeMap::new(),
-            children: vec![paragraph(line, d.span)],
+            children: vec![Node::Custom(code)],
         };
+        node.attrs.insert("html_tag".to_owned(), json!("pre"));
         if !group.is_empty() {
             node.attrs.insert("group".to_owned(), json!(group));
         }
