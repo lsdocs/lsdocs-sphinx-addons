@@ -35,6 +35,16 @@
 //! | `sectionauthor`, `codeauthor` | A paragraph naming the author if `show_authors` is on; nothing otherwise. |
 //! | `acks` | A `custom:acks` node with its content. |
 //! | `tabularcolumns` | Nothing (it is for LaTeX). |
+//! | `program` | Names the program the `option`s after it belong to (`None` for none). |
+//! | `option`, `cmdoption` | A `custom:desc` node (`domain: std`, `objtype`) around a definition list: each signature (one per line, `-o FILE, --output=FILE`) a term, with an id per option (`cmdoption-<program>-<option>`) for `option` references and index entries, and the content its description. |
+//! | `envvar`, `confval` | Likewise, with the ids `envvar-<name>` and `confval-<name>`; `confval`'s `:type:` and `:default:` come first in its description. |
+//! | `describe`, `object` | Likewise, with no id or index entry. |
+//! | `productionlist` | A `custom:productionlist` node (`html_tag: pre`) around a `custom:productions` inline (`html_tag: code`), drawn like a code block: grammar productions (`name: tokens`), one per line, the names aligned, each name with an id (`grammar-token-<group>-<name>`) for `token` references, and each `` `token` `` in them a reference. A first line without `:` names their group. |
+//!
+//! `option`, `envvar` and `confval` take `:no-index:` (no ids),
+//! `:no-index-entry:`, `:no-contents-entry:` and `:no-typesetting:` (the
+//! ids alone). The directives and roles of Sphinx's standard domain can be
+//! written with its prefix too (`std:option`, `` :std:ref:`label` ``).
 //!
 //! Roles:
 //!
@@ -54,6 +64,10 @@
 //! | `dfn`, `mailheader`, `mimetype`, `newsgroup`, `manpage` | Emphasized text; `manpage` links to `manpages_url` if set. |
 //! | `makevar`, `regexp` | Inline code. |
 //! | `index` | The text, with an anchor and an index entry. |
+//! | `option` | A link to a command line option, around its code: `-o` of the current `program`, or `prog -o`, `prog sub -o` (`-o=FILE` finds `-o`). |
+//! | `envvar` | A link to an environment variable, around its code, with an index entry. |
+//! | `confval`, `token` | A link to a configuration value or grammar token (`group:name`; `~group:name` shows `name`), around its code. |
+//! | `keyword` | A link to a label, around its code. |
 //! | the `extlinks` names | Links built from a URL pattern, as `sphinx.ext.extlinks` does. |
 //!
 //! `custom` inlines have the attribute `inline: true` (and `html_tag`,
@@ -75,14 +89,15 @@
 //! | `manpages_url` | none | URL pattern for `manpage` (`{page}`, `{section}`, `{path}`). |
 //! | `extlinks` | `{}` | Roles making links: `{ issue = { url = "https://example.com/issues/%s", caption = "#%s" } }`. |
 //! | `toctree_nav` | `true` | Set `nav_children` from toctrees. |
+//! | `option_emphasise_placeholders` | `false` | Emphasize the `{placeholders}` of `option` signatures (`--output={FILE}`), as `samp` does, without their braces. |
 //!
 //! If any page has index entries, the plugin generates the index page,
 //! `genindex.md` (`genindex.html`): entries by letter, with links to where
 //! they are. `` :ref:`genindex` ``, `` :doc:`genindex` `` and a `genindex`
 //! toctree entry link to it.
 //!
-//! Domains (`py:function` and the like) are not here: they belong to the
-//! API documentation framework.
+//! Sphinx's standard domain is here, as Sphinx adds it; other domains
+//! (`py:function` and the like) belong to the API documentation framework.
 
 mod directives;
 mod roles;
@@ -129,6 +144,7 @@ pub(crate) struct Options {
     pub manpages_url: Option<String>,
     pub extlinks: BTreeMap<String, ExtLink>,
     pub toctree_nav: bool,
+    pub option_emphasise_placeholders: bool,
 }
 
 /// An `extlinks` entry.
@@ -156,6 +172,7 @@ impl Default for Options {
             manpages_url: None,
             extlinks: BTreeMap::new(),
             toctree_nav: true,
+            option_emphasise_placeholders: false,
         }
     }
 }
@@ -193,6 +210,12 @@ fn directive(name: &str) -> DirectiveSyntax {
 }
 
 fn option_kinds<const N: usize>(list: [(&str, OptionSyntax); N]) -> BTreeMap<String, OptionSyntax> {
+    option_kinds_of(list)
+}
+
+fn option_kinds_of<'n>(
+    list: impl IntoIterator<Item = (&'n str, OptionSyntax)>,
+) -> BTreeMap<String, OptionSyntax> {
     list.into_iter().map(|(n, k)| (n.to_owned(), k)).collect()
 }
 
@@ -370,12 +393,66 @@ pub(crate) fn syntax(options: &Options) -> Syntax {
         final_argument_whitespace: true,
         ..directive("tabularcolumns")
     });
+    directives.push(DirectiveSyntax {
+        required_arguments: 1,
+        final_argument_whitespace: true,
+        ..directive("program")
+    });
+    let object_flags = [
+        ("no-index", Flag),
+        ("noindex", Flag),
+        ("no-index-entry", Flag),
+        ("noindexentry", Flag),
+        ("no-contents-entry", Flag),
+        ("no-typesetting", Flag),
+    ];
+    for name in ["option", "cmdoption", "envvar", "describe", "object"] {
+        directives.push(DirectiveSyntax {
+            required_arguments: 1,
+            final_argument_whitespace: true,
+            options: option_kinds(object_flags),
+            content: blocks,
+            ..directive(name)
+        });
+    }
+    let mut confval = object_flags.to_vec();
+    confval.extend([("type", Required), ("default", Required)]);
+    directives.push(DirectiveSyntax {
+        required_arguments: 1,
+        final_argument_whitespace: true,
+        options: option_kinds_of(confval),
+        content: blocks,
+        ..directive("confval")
+    });
+    // The productions are its argument in reStructuredText (as Sphinx),
+    // its content in Markdown.
+    directives.push(DirectiveSyntax {
+        optional_arguments: 1,
+        final_argument_whitespace: true,
+        content: ContentSyntax::Text,
+        ..directive("productionlist")
+    });
+    // The standard domain's names, with its prefix.
+    let prefixed: Vec<DirectiveSyntax> = directives
+        .iter()
+        .filter(|d| directives::std_domain::DOMAIN_DIRECTIVES.contains(&d.name.as_str()))
+        .map(|d| DirectiveSyntax {
+            name: format!("std:{}", d.name),
+            ..d.clone()
+        })
+        .collect();
+    directives.extend(prefixed);
     let mut roles: Vec<RoleSyntax> = roles::NAMES
         .iter()
         .map(|name| RoleSyntax {
             name: (*name).to_owned(),
         })
         .collect();
+    for name in directives::std_domain::DOMAIN_ROLES {
+        roles.push(RoleSyntax {
+            name: format!("std:{name}"),
+        });
+    }
     for name in options.extlinks.keys() {
         roles.push(RoleSyntax {
             name: name.to_lowercase(),
@@ -416,6 +493,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<ParseTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
+        directives::std_domain::parse_options(&mut document, ctx).await;
         let (notes, _) = expand(&mut document, &options, ctx);
         Ok(ParseTransformEachResult {
             data: roles::collect(&document, &notes, &options),
@@ -443,6 +521,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<RenderTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
+        directives::std_domain::parse_options(&mut document, ctx).await;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
         let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         // The pages toctrees name are this page's children in the

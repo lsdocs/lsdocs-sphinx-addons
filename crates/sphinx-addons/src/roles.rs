@@ -40,6 +40,11 @@ pub(crate) const NAMES: &[&str] = &[
     "regexp",
     "samp",
     "index",
+    "option",
+    "envvar",
+    "confval",
+    "token",
+    "keyword",
 ];
 
 /// The source path of the generated index page.
@@ -107,7 +112,7 @@ pub(crate) fn find_document(docs: &[(String, String)], from: &str, target: &str)
 }
 
 /// Ids a reference can point to.
-fn anchors(document: &Document) -> Vec<String> {
+pub(crate) fn anchors(document: &Document) -> Vec<String> {
     document
         .descendants()
         .filter_map(|n| match n {
@@ -217,6 +222,10 @@ pub(crate) fn collect(document: &Document, notes: &Notes, _options: &Options) ->
         "sections": sections(&document.children),
         "toctrees": notes.toctrees,
         "index": notes.index,
+        "options": notes.options,
+        "envvars": notes.envvars,
+        "confvals": notes.confvals,
+        "tokens": notes.tokens,
     })
 }
 
@@ -478,6 +487,9 @@ impl<'a> Site<'a> {
                 }
             },
             "numref" => self.numref(&target, title.as_deref(), source, span, out),
+            "option" | "envvar" | "confval" | "token" | "keyword" => {
+                self.std_object(c, name, title.as_deref(), &target, source, out)
+            }
             "term" => {
                 let key = target.to_lowercase();
                 match self.find("terms", &key) {
@@ -719,6 +731,109 @@ impl<'a> Site<'a> {
             .replace("{number}", &number)
             .replace("{name}", caption);
         vec![self.link_to(source, doc, Some(&label), vec![text(label_text)], span)]
+    }
+
+    /// A reference of the standard domain (`option`, `envvar`, `confval`,
+    /// `token`, `keyword`): a link around the code it shows, or the code
+    /// alone if nothing has the name (a warning, except for `envvar` and
+    /// `token`, as Sphinx).
+    fn std_object(
+        &self,
+        c: &Custom,
+        name: &str,
+        title: Option<&str>,
+        target: &str,
+        source: &str,
+        out: &mut Vec<Diagnostic>,
+    ) -> Vec<Node> {
+        let span = c.span;
+        let (target, shown) = if name == "token" {
+            // `~group:name` shows `name`.
+            let shown = match title {
+                Some(title) => title.to_owned(),
+                None => match target.strip_prefix('~') {
+                    Some(rest) => rest.rsplit_once(':').map_or(rest, |(_, n)| n).to_owned(),
+                    None => target.to_owned(),
+                },
+            };
+            (target.trim_start_matches('~').to_owned(), shown)
+        } else {
+            (target.to_owned(), title.unwrap_or(target).to_owned())
+        };
+        let found: Option<(&str, String)> = match name {
+            "option" => {
+                let program = c.attrs.get("program").and_then(Value::as_str);
+                self.find_option(program, &target)
+                    .and_then(|(doc, id)| Some((doc, id.as_str()?.to_owned())))
+            }
+            "keyword" => {
+                let label = self.label(&target);
+                self.anchor_document(&label).map(|doc| (doc, label))
+            }
+            _ => {
+                let field = format!("{name}s");
+                self.find(&field, &target)
+                    .and_then(|(doc, id)| Some((doc, id.as_str()?.to_owned())))
+            }
+        };
+        let uncoded = c
+            .attrs
+            .get(crate::directives::std_domain::UNCODED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let code = if uncoded {
+            vec![Node::Text(Text { span, value: shown })]
+        } else {
+            vec![Node::InlineCode(InlineCode { span, value: shown })]
+        };
+        match found {
+            Some((doc, id)) => vec![self.link_to(source, doc, Some(&id), code, span)],
+            None => {
+                let message = match name {
+                    "option" => Some(format!("unknown option: {target:?}")),
+                    "keyword" => Some(format!("unknown keyword: {target:?}")),
+                    "confval" => Some(format!("'confval' reference target not found: {target}")),
+                    _ => None,
+                };
+                if let Some(message) = message {
+                    out.push(warning(span, message));
+                }
+                code
+            }
+        }
+    }
+
+    /// The option `target` (`-o`, `--output=FILE`, `prog sub -o`) of
+    /// `program`, found as Sphinx finds it: as written, then without its
+    /// value, then with its first words taken for the (sub)program.
+    fn find_option(&self, program: Option<&str>, target: &str) -> Option<(&'a str, &'a Value)> {
+        let find = |program: Option<&str>, option: &str| {
+            self.find(
+                "options",
+                &crate::directives::std_domain::option_key(program, option),
+            )
+        };
+        let target = target.trim();
+        if let Some(found) = find(program, target) {
+            return Some(found);
+        }
+        for needle in ["=", "[=", " "] {
+            if let Some((stem, _)) = target.split_once(needle)
+                && let Some(found) = find(program, stem)
+            {
+                return Some(found);
+            }
+        }
+        let mut commands = Vec::new();
+        let mut rest = target;
+        while let Some((command, after)) = rest.split_once(char::is_whitespace) {
+            commands.push(command);
+            rest = after.trim_start();
+            if let Some(found) = find(Some(&commands.join("-")), rest) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// A toctree's list of links, from the placeholder `Expand` made
@@ -1271,7 +1386,12 @@ pub(crate) fn genindex(collected: &Value) -> Option<Document> {
 }
 
 /// A `custom` inline node.
-fn inline(kind: &str, tag: Option<&str>, children: Vec<Node>, span: Option<Span>) -> Node {
+pub(crate) fn inline(
+    kind: &str,
+    tag: Option<&str>,
+    children: Vec<Node>,
+    span: Option<Span>,
+) -> Node {
     let mut attrs = BTreeMap::new();
     attrs.insert("inline".to_owned(), json!(true));
     if let Some(tag) = tag {
@@ -1330,7 +1450,7 @@ fn accelerated(value: &str, span: Option<Span>) -> Vec<Node> {
 
 /// The parts of `file` and `samp` text: literal text, and `{variable}`
 /// parts (`\{` is a literal brace).
-fn variable_parts(value: &str) -> Vec<(bool, String)> {
+pub(crate) fn variable_parts(value: &str) -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
     let mut buf = String::new();
     let mut variable = false;
