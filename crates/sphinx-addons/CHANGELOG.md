@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/lsdocs/lsdocs-sphinx-addons/compare/lsdocs-sphinx-addons/v0.1.0...lsdocs-sphinx-addons/v0.1.1) - 2026-11-26
+
+### Added
+
+- compound kbd keys; several terms per glossary entry ([#18](https://github.com/lsdocs/lsdocs-sphinx-addons/pull/18))
+- Sphinx's standard domain ([#17](https://github.com/lsdocs/lsdocs-sphinx-addons/pull/17))
+
+### Fixed
+
+- take the parsed documents for doc and toctree, not files by extension ([#16](https://github.com/lsdocs/lsdocs-sphinx-addons/pull/16))
+
+### Other
+
+- parse with lsdocs-parser-markdown's myst dialect ([#14](https://github.com/lsdocs/lsdocs-sphinx-addons/pull/14))
+
 ## [0.1.0](https://github.com/lsdocs/lsdocs-sphinx-addons/releases/tag/lsdocs-sphinx-addons/v0.1.0) - 2026-11-22
 
 ### Added
