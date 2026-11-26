@@ -89,6 +89,7 @@
 //! | `manpages_url` | none | URL pattern for `manpage` (`{page}`, `{section}`, `{path}`). |
 //! | `extlinks` | `{}` | Roles making links: `{ issue = { url = "https://example.com/issues/%s", caption = "#%s" } }`. |
 //! | `toctree_nav` | `true` | Set `nav_children` from toctrees. |
+//! | `option_emphasise_placeholders` | `false` | Emphasize the `{placeholders}` of `option` signatures (`--output={FILE}`), as `samp` does, without their braces. |
 //!
 //! If any page has index entries, the plugin generates the index page,
 //! `genindex.md` (`genindex.html`): entries by letter, with links to where
@@ -143,6 +144,7 @@ pub(crate) struct Options {
     pub manpages_url: Option<String>,
     pub extlinks: BTreeMap<String, ExtLink>,
     pub toctree_nav: bool,
+    pub option_emphasise_placeholders: bool,
 }
 
 /// An `extlinks` entry.
@@ -170,6 +172,7 @@ impl Default for Options {
             manpages_url: None,
             extlinks: BTreeMap::new(),
             toctree_nav: true,
+            option_emphasise_placeholders: false,
         }
     }
 }
@@ -490,6 +493,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<ParseTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
+        directives::std_domain::parse_options(&mut document, ctx).await;
         let (notes, _) = expand(&mut document, &options, ctx);
         Ok(ParseTransformEachResult {
             data: roles::collect(&document, &notes, &options),
@@ -517,6 +521,7 @@ impl Transformer for SphinxAddons {
     ) -> PluginResult<RenderTransformEachResult> {
         let options = Options::read(ctx.settings())?;
         let mut document = params.document;
+        directives::std_domain::parse_options(&mut document, ctx).await;
         let (notes, mut diagnostics) = expand(&mut document, &options, ctx);
         let site = roles::Site::new(&params.collected, &ctx.site().files, &options);
         // The pages toctrees name are this page's children in the

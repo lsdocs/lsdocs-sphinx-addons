@@ -27,20 +27,18 @@ Its settings and behavior are described in the lsdocs documentation
   definition list); `conf.py` settings that change parsing
   (`default_role`, `rst_prolog` / `rst_epilog`, the `|version|` and
   `|release|` substitutions).
-- Standard domain: `confval`'s `:type:` and `:default:` are shown as
-  text, not parsed as inline markup; `option_emphasise_placeholders` is
-  not supported; an object described twice gets the same id twice
-  (Sphinx numbers the second), and references go to the first; ids drop
+- Standard domain: references to an object described twice go to the
+  first description (Sphinx takes the last, and warns); ids drop
   characters outside ASCII (Sphinx first decomposes them, so `e` with an
   accent is `e`). A `productionlist`'s names line up only where the
   renderer keeps its spaces (Sphinx draws it preformatted).
+- `confval`'s `:type:` and `:default:` are parsed by the site's parser
+  for the document's extension (`host/parse`); a document no parser
+  answers for keeps them as text.
 
 ## TODO
 
 - [ ] `literalinclude`'s `:pyobject:` and `:diff:`; other encodings.
 - [ ] Compound `kbd` keys; several terms per glossary entry.
-- [ ] Standard domain: inline markup in `confval`'s `:type:` and
-      `:default:`; `option_emphasise_placeholders`; unique ids for
-      objects described twice.
 - [ ] The parsing settings of `conf.py` (`default_role`, `rst_prolog` /
       `rst_epilog`, `|version|` / `|release|`).

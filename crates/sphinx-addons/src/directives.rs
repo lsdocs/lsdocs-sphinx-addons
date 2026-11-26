@@ -52,6 +52,8 @@ struct Parts {
     argument: String,
     options: serde_json::Map<String, Value>,
     content: Option<String>,
+    /// Options parsed as inline markup (`std_domain::parse_options`).
+    parsed_options: serde_json::Map<String, Value>,
     /// The parsed argument, for directives declared with an inline one.
     argument_nodes: Vec<Node>,
     /// The parsed content.
@@ -80,6 +82,12 @@ impl Parts {
                 .cloned()
                 .unwrap_or_default(),
             content: string(custom.attrs.get("content")),
+            parsed_options: custom
+                .attrs
+                .get(std_domain::PARSED_OPTIONS)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
             kind: custom.kind,
             span: custom.span,
             argument_nodes,
@@ -110,6 +118,10 @@ pub(crate) struct Expand<'a> {
     highlight: Option<String>,
     /// The program a `program` directive set, for options.
     program: Option<String>,
+    /// The ids the document has, so that new ones are unique.
+    ids: std::collections::BTreeSet<String>,
+    /// The fallback numbers given so far, by id prefix.
+    serials: BTreeMap<String, u32>,
     todos: u32,
     equations: u32,
     indexes: u32,
@@ -157,6 +169,8 @@ impl<'a> Expand<'a> {
             site,
             highlight: options.highlight_language.clone(),
             program: None,
+            ids: std::collections::BTreeSet::new(),
+            serials: BTreeMap::new(),
             todos: 0,
             equations: 0,
             indexes: 0,
@@ -166,6 +180,7 @@ impl<'a> Expand<'a> {
     }
 
     pub fn document(&mut self, document: &mut Document) {
+        self.ids.extend(crate::roles::anchors(document));
         let children = std::mem::take(&mut document.children);
         document.children = self.nodes(children);
     }

@@ -112,7 +112,7 @@ pub(crate) fn find_document(docs: &[(String, String)], from: &str, target: &str)
 }
 
 /// Ids a reference can point to.
-fn anchors(document: &Document) -> Vec<String> {
+pub(crate) fn anchors(document: &Document) -> Vec<String> {
     document
         .descendants()
         .filter_map(|n| match n {
@@ -1377,7 +1377,12 @@ pub(crate) fn genindex(collected: &Value) -> Option<Document> {
 }
 
 /// A `custom` inline node.
-fn inline(kind: &str, tag: Option<&str>, children: Vec<Node>, span: Option<Span>) -> Node {
+pub(crate) fn inline(
+    kind: &str,
+    tag: Option<&str>,
+    children: Vec<Node>,
+    span: Option<Span>,
+) -> Node {
     let mut attrs = BTreeMap::new();
     attrs.insert("inline".to_owned(), json!(true));
     if let Some(tag) = tag {
@@ -1436,7 +1441,7 @@ fn accelerated(value: &str, span: Option<Span>) -> Vec<Node> {
 
 /// The parts of `file` and `samp` text: literal text, and `{variable}`
 /// parts (`\{` is a literal brace).
-fn variable_parts(value: &str) -> Vec<(bool, String)> {
+pub(crate) fn variable_parts(value: &str) -> Vec<(bool, String)> {
     let mut out: Vec<(bool, String)> = Vec::new();
     let mut buf = String::new();
     let mut variable = false;

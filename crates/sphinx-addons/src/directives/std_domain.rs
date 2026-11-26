@@ -4,14 +4,104 @@
 //! (`Notes`), and `Site` resolves the roles that name them. The domain's
 //! names can be written with a `std:` prefix (`std:option`, `:std:ref:`).
 
+use lsdocs_plugin_sdk::Context;
 use lsdocs_plugin_sdk::doctree::{
-    Custom, DefinitionDescription, DefinitionList, DefinitionTerm, InlineCode, LineBreak, Node,
-    Span, Strong, Text,
+    Custom, DefinitionDescription, DefinitionList, DefinitionTerm, Document, Emphasis, InlineCode,
+    LineBreak, Node, Span, Strong, Text,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::{Expand, Parts, anchor, paragraph};
+
+/// The attribute holding a directive's options parsed as inline markup.
+pub(crate) const PARSED_OPTIONS: &str = "parsed_options";
+
+/// The options of a directive that are inline markup.
+fn inline_options(kind: &str) -> &'static [&'static str] {
+    match directive_name(kind) {
+        "confval" => &["type", "default"],
+        _ => &[],
+    }
+}
+
+/// Parses the options of the domain's directives that are inline markup
+/// (`confval`'s `:type:` and `:default:`) with the document's parser
+/// (`host/parse`), as Sphinx does, keeping them in the directive's
+/// `PARSED_OPTIONS` attribute for `Expand`. An option no parser takes, or
+/// that is not one paragraph, stays text.
+pub(crate) async fn parse_options(document: &mut Document, ctx: &Context) {
+    let Some((_, extension)) = document.source.rsplit_once('.') else {
+        return;
+    };
+    let mut texts = Vec::new();
+    visit(&document.children, &mut |c| {
+        for option in inline_options(&c.kind) {
+            if let Some(text) = c
+                .attrs
+                .get("options")
+                .and_then(|o| o.get(*option))
+                .and_then(Value::as_str)
+            {
+                texts.push(text.trim().to_owned());
+            }
+        }
+    });
+    if texts.is_empty() {
+        return;
+    }
+    let mut parsed = Vec::with_capacity(texts.len());
+    for text in texts {
+        let nodes = match ctx.parse(extension, &document.source, &text).await {
+            Ok(result) => match <[Node; 1]>::try_from(result.document.children) {
+                Ok([Node::Paragraph(p)]) => Some(p.children),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        parsed.push(nodes);
+    }
+    let mut parsed = parsed.into_iter();
+    visit_mut(&mut document.children, &mut |c| {
+        let mut map = serde_json::Map::new();
+        for option in inline_options(&c.kind) {
+            let given = c
+                .attrs
+                .get("options")
+                .and_then(|o| o.get(*option))
+                .is_some_and(Value::is_string);
+            if given && let Some(Some(nodes)) = parsed.next() {
+                map.insert((*option).to_owned(), json!(nodes));
+            }
+        }
+        if !map.is_empty() {
+            c.attrs
+                .insert(PARSED_OPTIONS.to_owned(), Value::Object(map));
+        }
+    });
+}
+
+/// Calls `f` with every `custom` node of `nodes` and below, in document
+/// order.
+fn visit(nodes: &[Node], f: &mut impl FnMut(&Custom)) {
+    for node in nodes {
+        if let Node::Custom(c) = node {
+            f(c);
+        }
+        visit(node.children(), f);
+    }
+}
+
+fn visit_mut(nodes: &mut [Node], f: &mut impl FnMut(&mut Custom)) {
+    for node in nodes {
+        if let Node::Custom(c) = node {
+            f(c);
+        }
+        if let Some(children) = node.children_mut() {
+            visit_mut(children, f);
+        }
+    }
+}
 
 /// The directives handled here, without their `std:` prefix.
 pub(super) const DIRECTIVES: &[&str] = &[
@@ -211,6 +301,52 @@ fn token_nodes(text: &str, group: &str) -> Vec<Node> {
 }
 
 impl Expand<'_> {
+    /// An id for `term`, as Sphinx's `make_id` makes one: `<prefix>-<term>`
+    /// (`sphinx_id`), or `<prefix>-<n>` if that is taken in the document
+    /// (or is the prefix alone).
+    fn make_id(&mut self, prefix: &str, term: &str) -> String {
+        let mut id = Some(sphinx_id(&format!("{prefix}-{term}")))
+            .filter(|id| !id.is_empty() && id != prefix);
+        loop {
+            match id {
+                Some(found) if !self.ids.contains(&found) => {
+                    self.ids.insert(found.clone());
+                    return found;
+                }
+                _ => {
+                    let n = self.serials.entry(prefix.to_owned()).or_insert(0);
+                    id = Some(format!("{prefix}-{n}"));
+                    *n += 1;
+                }
+            }
+        }
+    }
+
+    /// The arguments of an option (`=FILE`, ` FILE`, `[=N]`) as code; with
+    /// `option_emphasise_placeholders`, as Sphinx, their `{placeholders}`
+    /// emphasized (without the braces).
+    fn option_args(&self, args: &str) -> Node {
+        let parts = crate::roles::variable_parts(args);
+        if !self.options.option_emphasise_placeholders || parts.iter().all(|(v, _)| !v) {
+            return code(args);
+        }
+        let children = parts
+            .into_iter()
+            .map(|(variable, value)| {
+                let text = plain(&value);
+                if variable {
+                    Node::Emphasis(Emphasis {
+                        span: None,
+                        children: vec![text],
+                    })
+                } else {
+                    text
+                }
+            })
+            .collect();
+        crate::roles::inline("samp", Some("code"), children, None)
+    }
+
     /// A role of the domain: its name without `std:`; `option` remembers
     /// the current program, and `envvar` makes index entries, like
     /// Sphinx.
@@ -287,7 +423,7 @@ impl Expand<'_> {
                     term.push(name(&signature));
                     if indexed {
                         let name = collapse(&signature);
-                        let id = sphinx_id(&format!("{kind}-{name}"));
+                        let id = self.make_id(kind, &name);
                         let (field, entry) = if kind == "envvar" {
                             ("single", format!("environment variable; {name}"))
                         } else {
@@ -323,17 +459,23 @@ impl Expand<'_> {
         if kind == "confval" {
             for (option, label) in [("type", "Type"), ("default", "Default")] {
                 if let Some(value) = d.option(option) {
-                    description.push(paragraph(
-                        vec![
-                            Node::Strong(Strong {
-                                span: d.span,
-                                children: vec![plain(&format!("{label}:"))],
-                            }),
-                            plain(" "),
-                            plain(value.trim()),
-                        ],
-                        d.span,
-                    ));
+                    let body = match d.parsed_options.get(option) {
+                        Some(nodes) => {
+                            let nodes: Vec<Node> =
+                                serde_json::from_value(nodes.clone()).unwrap_or_default();
+                            self.nodes(nodes)
+                        }
+                        None => vec![plain(value.trim())],
+                    };
+                    let mut line = vec![
+                        Node::Strong(Strong {
+                            span: d.span,
+                            children: vec![plain(&format!("{label}:"))],
+                        }),
+                        plain(" "),
+                    ];
+                    line.extend(body);
+                    description.push(paragraph(line, d.span));
                 }
             }
         }
@@ -384,7 +526,7 @@ impl Expand<'_> {
             }
             term.push(name(&option));
             if !args.is_empty() {
-                term.push(code(&args));
+                term.push(self.option_args(&args));
             }
             names.push(option);
         }
@@ -415,7 +557,7 @@ impl Expand<'_> {
                 if !option.starts_with(['-', '/']) {
                     prefix.push("arg");
                 }
-                sphinx_id(&format!("{}-{option}", prefix.join("-")))
+                self.make_id(&prefix.join("-"), option)
             })
             .collect();
         let Some(first) = ids.first().cloned() else {
@@ -481,7 +623,7 @@ impl Expand<'_> {
             if production.is_empty() {
                 line.push(plain(&" ".repeat(width + 5)));
             } else {
-                let id = sphinx_id(&format!("grammar-token-{group}-{production}"));
+                let id = self.make_id(&format!("grammar-token-{group}"), production);
                 let key = if group.is_empty() {
                     production.to_owned()
                 } else {

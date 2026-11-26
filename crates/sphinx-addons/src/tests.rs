@@ -2,7 +2,7 @@
 
 use lsdocs_plugin_sdk::doctree::{Document, Node, plain_text};
 use lsdocs_plugin_sdk::protocol::{Diagnostic, InitializeParams, SiteInfo};
-use lsdocs_plugin_sdk::testing::run_transform;
+use lsdocs_plugin_sdk::testing::{context_with_parsers, run_transform_in};
 use serde_json::{Value, json};
 
 use super::{Options, plugin, syntax};
@@ -57,7 +57,13 @@ async fn build_site(
         },
         options,
     );
-    run_transform(&plugin(), &init, documents).await.unwrap()
+    // `host/parse` goes to the parsers, as in a site.
+    let parsers = vec![
+        lsdocs_parser_rst::plugin(),
+        lsdocs_parser_markdown::myst::plugin(),
+    ];
+    let ctx = context_with_parsers(&plugin(), &init, parsers);
+    run_transform_in(&plugin(), &ctx, documents).await.unwrap()
 }
 
 /// `value` without spans, for comparing trees from different sources.
@@ -887,4 +893,64 @@ async fn std_objects_without_targets() {
     let index = plain(&tree(&out[1].0));
     assert!(index.contains("HIDDEN"), "{index}");
     assert!(!index.contains("-b"), "{index}");
+}
+
+#[tokio::test]
+async fn confval_options_are_inline_markup() {
+    let t = same(
+        ".. confval:: jobs\n   :type: ``int``\n   :default: *all* cores\n",
+        "```{confval} jobs\n:type: `int`\n:default: *all* cores\n```\n",
+        Value::Null,
+    )
+    .await;
+    let fields = &t[0]["children"][0]["children"][1]["children"];
+    assert_eq!(
+        fields[0]["children"][2],
+        json!({"type": "inline_code", "value": "int"})
+    );
+    assert_eq!(fields[1]["children"][2]["type"], "emphasis");
+    assert_eq!(plain(&fields[1]), "Default: all cores");
+}
+
+#[tokio::test]
+async fn option_placeholders() {
+    let rst = ".. option:: --output={FILE}, -j[={N}]\n";
+    let off = build(&[("a.rst", rst)], Value::Null).await;
+    let term = &tree(&off[0].0)[0]["children"][0]["children"][0]["children"];
+    assert_eq!(term[3], json!({"type": "inline_code", "value": "={FILE}"}));
+    let on = build(
+        &[("a.rst", rst)],
+        json!({"option_emphasise_placeholders": true}),
+    )
+    .await;
+    let term = &tree(&on[0].0)[0]["children"][0]["children"][0]["children"];
+    let args = &term[3];
+    assert_eq!(args["kind"], "samp");
+    assert_eq!(args["children"][0]["value"], "=");
+    assert_eq!(args["children"][1]["type"], "emphasis");
+    assert_eq!(plain(&args["children"][1]), "FILE");
+    assert_eq!(plain(&term[6]), "[=N]");
+}
+
+/// Ids are unique in a document, as Sphinx makes them: a taken one is
+/// `<prefix>-<n>`.
+#[tokio::test]
+async fn std_ids_are_unique() {
+    let out = build(
+        &[(
+            "a.rst",
+            ".. _envvar-home:\n\nHome\n====\n\n\
+             .. envvar:: home\n\n.. envvar:: home\n\n\
+             .. option:: -v\n\n.. option:: -v\n",
+        )],
+        Value::Null,
+    )
+    .await;
+    let ids = anchor_ids(&tree(&out[0].0));
+    assert_eq!(
+        ids.iter()
+            .filter(|i| i.starts_with("envvar") || i.starts_with("cmdoption"))
+            .collect::<Vec<_>>(),
+        ["envvar-0", "envvar-1", "cmdoption-v", "cmdoption-0"]
+    );
 }
