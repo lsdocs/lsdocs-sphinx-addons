@@ -650,3 +650,241 @@ async fn numbered_toctrees_and_navigation() {
     let (sub, _) = &out[3];
     assert_eq!(plain_text(&sub.children), "1.2. Sub");
 }
+
+/// The ids a tree's anchors have, in order.
+fn anchor_ids(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match value {
+        Value::Object(map) => {
+            if map.get("type") == Some(&json!("anchor")) {
+                out.push(map["id"].as_str().unwrap().to_owned());
+            }
+            for v in map.values() {
+                out.extend(anchor_ids(v));
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                out.extend(anchor_ids(v));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The text of a tree.
+fn plain(value: &Value) -> String {
+    match value {
+        Value::Object(map) => match map.get("value") {
+            Some(Value::String(s)) => s.clone(),
+            _ => map.get("children").map(plain).unwrap_or_default(),
+        },
+        Value::Array(items) => items.iter().map(plain).collect(),
+        _ => String::new(),
+    }
+}
+
+/// The links of a tree (`url`), in order.
+fn urls(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match value {
+        Value::Object(map) => {
+            if map.get("type") == Some(&json!("link")) {
+                out.push(map["url"].as_str().unwrap().to_owned());
+            }
+            for v in map.values() {
+                out.extend(urls(v));
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                out.extend(urls(v));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+#[tokio::test]
+async fn std_objects() {
+    let t = same(
+        ".. program:: git commit\n\n\
+         .. option:: -m MSG, --message=MSG\n\n   Commit.\n\n\
+         .. std:envvar:: GIT_DIR\n\n\
+         .. confval:: core.editor\n   :type: string\n   :default: vi\n\n   The editor.\n\n\
+         .. describe:: anything at all\n\n\
+         .. productionlist:: git\n   rev: `name` | `name` \"~\" DIGIT+\n      : | `~other:x`\n   n: DIGIT+\n",
+        "```{program} git commit\n```\n\n\
+         ```{option} -m MSG, --message=MSG\n\nCommit.\n```\n\n\
+         ```{std:envvar} GIT_DIR\n```\n\n\
+         ```{confval} core.editor\n:type: string\n:default: vi\n\nThe editor.\n```\n\n\
+         ```{describe} anything at all\n```\n\n\
+         ```{productionlist} git\nrev: `name` | `name` \"~\" DIGIT+\n   : | `~other:x`\nn: DIGIT+\n```\n",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        anchor_ids(&t),
+        [
+            "cmdoption-git-commit-m",
+            "cmdoption-git-commit-message",
+            "envvar-GIT_DIR",
+            "confval-core.editor",
+            "grammar-token-git-rev",
+            "grammar-token-git-n",
+        ]
+    );
+    let option = &t[0];
+    assert_eq!(option["kind"], "desc");
+    assert_eq!(
+        option["attrs"],
+        json!({"domain": "std", "objtype": "option"})
+    );
+    // The signature, then the description.
+    let list = &option["children"][0]["children"];
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let signature = &list[0]["children"];
+    assert_eq!(signature[2]["children"][0]["value"], "-m");
+    assert_eq!(signature[3]["value"], " MSG");
+    assert_eq!(signature[5]["children"][0]["value"], "--message");
+    assert_eq!(signature[6]["value"], "=MSG");
+    // confval: its type and default before its content.
+    let confval = &t[2]["children"][0]["children"][1]["children"];
+    assert_eq!(plain(&confval[0]), "Type: string");
+    assert_eq!(plain(&confval[1]), "Default: vi");
+    assert_eq!(plain(&confval[2]), "The editor.");
+    // describe: no target, no domain.
+    assert_eq!(t[3]["attrs"], json!({"objtype": "describe"}));
+    // productionlist: names aligned; a token no production names is code
+    // (linked ones: `std_references`).
+    let production = &t[4]["children"][0]["children"];
+    assert_eq!(t[4]["attrs"]["group"], "git");
+    assert_eq!(production[2]["value"], " ::= ");
+    assert_eq!(
+        production[3],
+        json!({"type": "inline_code", "value": "name"})
+    );
+    let continued = production
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|n| n["type"] == "line_break")
+        .unwrap();
+    assert_eq!(production[continued + 1]["value"], "        ");
+}
+
+#[tokio::test]
+async fn std_references() {
+    let out = build(
+        &[
+            (
+                "cli.rst",
+                ".. _commands:\n\nCommands\n========\n\n\
+                 .. option:: --version\n            -V\n\n\
+                 .. program:: git commit\n\n\
+                 .. option:: -m MSG\n\n\
+                 .. program:: None\n\n\
+                 .. option:: -v\n\n\
+                 .. envvar:: GIT_DIR\n\n\
+                 .. confval:: core.editor\n\n\
+                 .. productionlist:: git\n   rev: `name`\n   name: WORD\n",
+            ),
+            (
+                "use.md",
+                "# Use\n\n\
+                 {option}`--version`, {option}`-V`, {option}`git commit -m`,\n\
+                 {option}`-v`, {std:option}`-v`, {envvar}`GIT_DIR`, {confval}`core.editor`,\n\
+                 {token}`~git:rev`, {token}`git:name`, {keyword}`commands`.\n\n\
+                 ```{program} git commit\n```\n\n\
+                 {option}`-m=hi`\n\n\
+                 {option}`-x`, {keyword}`nope`, {confval}`nope`, {envvar}`NOPE`, {token}`nope`\n",
+            ),
+        ],
+        Value::Null,
+    )
+    .await;
+    let (use_md, d) = &out[1];
+    assert_eq!(
+        messages(d),
+        [
+            "unknown option: \"-x\"",
+            "unknown keyword: \"nope\"",
+            "'confval' reference target not found: nope",
+        ]
+    );
+    let t = tree(use_md);
+    assert_eq!(
+        urls(&t),
+        [
+            "cli.rst#cmdoption-version",
+            "cli.rst#cmdoption-V",
+            "cli.rst#cmdoption-git-commit-m",
+            "cli.rst#cmdoption-v",
+            "cli.rst#cmdoption-v",
+            "cli.rst#envvar-GIT_DIR",
+            "cli.rst#confval-core.editor",
+            "cli.rst#grammar-token-git-rev",
+            "cli.rst#grammar-token-git-name",
+            "cli.rst#commands",
+            // After `program`, `-m` is git commit's, with or without a value.
+            "cli.rst#cmdoption-git-commit-m",
+        ]
+    );
+    let para = &t[0]["children"][1]["children"];
+    // References show code; `~group:name` shows the name.
+    assert_eq!(para[0]["children"][0]["type"], "inline_code");
+    let shown: Vec<String> = para
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["type"] == "link")
+        .map(plain)
+        .collect();
+    assert_eq!(shown[7], "rev");
+    assert_eq!(shown[8], "git:name");
+    // `envvar` is an index entry where it is too.
+    assert!(anchor_ids(para).contains(&"index-0".to_owned()));
+    // A signature per line in reStructuredText, each with its targets
+    // (`-V` is the second); tokens link within their group.
+    let cli = tree(&out[0].0);
+    let version = &cli[0]["children"][1]["children"][0]["children"];
+    assert_eq!(version[1]["children"][0]["id"], "cmdoption-V");
+    assert!(urls(&cli).contains(&"#grammar-token-git-name".to_owned()));
+}
+
+#[tokio::test]
+async fn std_objects_without_targets() {
+    let out = build(
+        &[(
+            "a.rst",
+            ".. option:: -a\n   :no-index:\n\n\
+             .. option:: -b\n   :no-index-entry:\n\n\
+             .. envvar:: HIDDEN\n   :no-typesetting:\n\n\
+             .. option:: =bad\n\n\
+             :option:`-a` :option:`-b`\n",
+        )],
+        Value::Null,
+    )
+    .await;
+    let (a, d) = &out[0];
+    assert_eq!(
+        messages(d),
+        [
+            "Malformed option description \"=bad\", should look like \"opt\", \"-opt args\", \
+             \"--opt args\", \"/opt args\" or \"+opt args\"",
+            "unknown option: \"-a\"",
+        ]
+    );
+    let t = tree(a);
+    // No index: no target; no typesetting: the target alone.
+    assert_eq!(anchor_ids(&t), ["cmdoption-b", "envvar-HIDDEN"]);
+    assert_eq!(t[2]["type"], "anchor");
+    // A malformed signature is shown as written.
+    assert_eq!(plain(&t[3]), "=bad");
+    // The index has HIDDEN (no typesetting keeps the entry), not -b.
+    let index = plain(&tree(&out[1].0));
+    assert!(index.contains("HIDDEN"), "{index}");
+    assert!(!index.contains("-b"), "{index}");
+}

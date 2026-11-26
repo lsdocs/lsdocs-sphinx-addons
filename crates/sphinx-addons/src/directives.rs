@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 
 use crate::{Options, warning};
 
+pub(crate) mod std_domain;
+
 /// What expanding a document found, for the collect pass.
 #[derive(Debug, Default)]
 pub(crate) struct Notes {
@@ -32,6 +34,15 @@ pub(crate) struct Notes {
     pub index: Vec<Value>,
     /// Files read (or looked for), the results' dependencies.
     pub files: Vec<String>,
+    /// Command line options (`std_domain::option_key`) and their anchors.
+    pub options: BTreeMap<String, String>,
+    /// Environment variables and their anchors.
+    pub envvars: BTreeMap<String, String>,
+    /// Configuration values and their anchors.
+    pub confvals: BTreeMap<String, String>,
+    /// Grammar tokens (`group:name`, or `name` outside a group) and their
+    /// anchors.
+    pub tokens: BTreeMap<String, String>,
 }
 
 /// A directive's parts, as the parsers make them.
@@ -97,6 +108,8 @@ pub(crate) struct Expand<'a> {
     site: &'a SiteInfo,
     /// The language a `highlight` directive set.
     highlight: Option<String>,
+    /// The program a `program` directive set, for options.
+    program: Option<String>,
     todos: u32,
     equations: u32,
     indexes: u32,
@@ -130,6 +143,12 @@ const DIRECTIVES: &[&str] = &[
     "rubric",
 ];
 
+/// Whether `kind` is a directive handled here.
+fn is_directive(kind: &str) -> bool {
+    let kind = std_domain::directive_name(kind);
+    DIRECTIVES.contains(&kind) || std_domain::DIRECTIVES.contains(&kind)
+}
+
 impl<'a> Expand<'a> {
     pub fn new(options: &'a Options, source: &str, site: &'a SiteInfo) -> Self {
         Self {
@@ -137,6 +156,7 @@ impl<'a> Expand<'a> {
             source: source.to_owned(),
             site,
             highlight: options.highlight_language.clone(),
+            program: None,
             todos: 0,
             equations: 0,
             indexes: 0,
@@ -155,9 +175,22 @@ impl<'a> Expand<'a> {
         let mut out = Vec::with_capacity(nodes.len());
         for node in nodes {
             match node {
-                Node::Custom(c) if DIRECTIVES.contains(&c.kind.as_str()) => {
+                Node::Custom(c) if is_directive(&c.kind) => {
                     let parts = Parts::new(c);
                     out.extend(self.directive(parts));
+                }
+                // The standard domain's roles: their names without
+                // `std:`, and what they need from where they are.
+                Node::Custom(c)
+                    if c.kind == "role"
+                        && c.attrs
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| {
+                                n.starts_with("std:") || n == "option" || n == "envvar"
+                            }) =>
+                {
+                    out.extend(self.std_role(c));
                 }
                 // The `index` role makes entries, like the directive.
                 Node::Custom(c)
@@ -205,6 +238,11 @@ impl<'a> Expand<'a> {
     }
 
     fn directive(&mut self, mut d: Parts) -> Vec<Node> {
+        d.kind = std_domain::directive_name(&d.kind).to_owned();
+        if d.kind == "productionlist" {
+            // Its content is text, not nodes.
+            return self.productionlist(&d);
+        }
         let children = std::mem::take(&mut d.children);
         let mut children = self.nodes(children);
         match d.kind.as_str() {
@@ -294,6 +332,10 @@ impl<'a> Expand<'a> {
             )],
             "hlist" => self.hlist(&d, children),
             "glossary" => self.glossary(&d, children),
+            "program" => self.program(&d),
+            "option" | "cmdoption" | "envvar" | "confval" | "describe" | "object" => {
+                self.object(&d, children)
+            }
             "toctree" => self.toctree(&d),
             "index" => {
                 let id = self.index_anchor(d.option("name"));
